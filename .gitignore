@@ -1,0 +1,20 @@
+# Build & packaging outputs
+.build/
+.swiftpm/
+dist/
+*.dmg
+*.app
+
+# macOS & IDE noise
+.DS_Store
+*.xcuserstate
+DerivedData/
+
+# Signing secrets (never commit private keys or certs)
+*.p12
+*.pfx
+*.key
+*.pem
+*.crt
+*.cer
+*.mobileprovision
