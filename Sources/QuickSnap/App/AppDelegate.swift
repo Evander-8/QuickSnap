@@ -22,19 +22,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var closePinsMenuItem: NSMenuItem?
     private var preferencesController: PreferencesWindowController?
     private var cancellables: Set<AnyCancellable> = []
+    private var systemObservers: [NSObjectProtocol] = []
+    private var distributedObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         setupStatusItem()
         setupHotkeys()
         observeSettings()
+        observeSystemLifecycle()
         coordinator.onPinCountChanged = { [weak self] count in
             self?.updateClosePinsMenuItem(count: count)
+        }
+
+        // 开机自启时 WindowServer 可能尚未就绪，2.5 秒后静默补注册一次热键
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            self?.reregisterHotkeys(silent: true)
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        coordinator.dismissAll()
+        removeSystemObservers()
+        coordinator.resetIfStuck()
         coordinator.closeAllPins()
         hotkeyManager.unregisterAll()
     }
@@ -105,20 +114,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reregisterHotkeys()
     }
 
-    private func reregisterHotkeys() {
+    private func reregisterHotkeys(silent: Bool = false) {
         let failed = hotkeyManager.registerAll(
             region: settings.regionHotkey,
             ocr: settings.ocrHotkey,
             fullscreen: settings.fullscreenHotkey
         )
         refreshMenuTitles()
-        if !failed.isEmpty {
+        if !silent && !failed.isEmpty {
             let names = failed.map(\.title).joined(separator: "、")
             ToastPresenter.shared.show(
                 message: "快捷键被占用：\(names)",
                 systemImage: "keyboard.badge.ellipsis"
             )
         }
+    }
+
+    private func observeSystemLifecycle() {
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        let appCenter = NotificationCenter.default
+        let distCenter = DistributedNotificationCenter.default()
+
+        let wakeHandler: @Sendable (Notification) -> Void = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.coordinator.resetIfStuck()
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                self.reregisterHotkeys(silent: true)
+            }
+        }
+
+        let resetHandler: @Sendable (Notification) -> Void = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.coordinator.resetIfStuck()
+            }
+        }
+
+        systemObservers.append(wsCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main, using: resetHandler))
+        systemObservers.append(wsCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main, using: wakeHandler))
+        systemObservers.append(wsCenter.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main, using: wakeHandler))
+        systemObservers.append(wsCenter.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main, using: wakeHandler))
+        systemObservers.append(appCenter.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main, using: resetHandler))
+
+        distributedObservers.append(
+            distCenter.addObserver(
+                forName: Notification.Name("com.apple.screenIsUnlocked"),
+                object: nil,
+                queue: .main,
+                using: wakeHandler
+            )
+        )
+    }
+
+    private func removeSystemObservers() {
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        let appCenter = NotificationCenter.default
+        let distCenter = DistributedNotificationCenter.default()
+
+        for token in systemObservers {
+            wsCenter.removeObserver(token)
+            appCenter.removeObserver(token)
+        }
+        systemObservers.removeAll()
+
+        for token in distributedObservers {
+            distCenter.removeObserver(token)
+        }
+        distributedObservers.removeAll()
     }
 
     private func observeSettings() {
@@ -161,10 +223,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openPreferences() {
         if preferencesController == nil {
-            let controller = PreferencesWindowController(settings: settings) { [weak self] in
-                self?.reregisterHotkeys()
-            }
+            let controller = PreferencesWindowController(
+                settings: settings,
+                onHotkeysUpdated: { [weak self] in
+                    self?.reregisterHotkeys()
+                },
+                onRecordingStateChanged: { [weak self] recording in
+                    self?.hotkeyManager.setSuspended(recording)
+                }
+            )
             controller.onDismissed = { [weak self] in
+                self?.hotkeyManager.setSuspended(false)
                 self?.preferencesController = nil
             }
             preferencesController = controller

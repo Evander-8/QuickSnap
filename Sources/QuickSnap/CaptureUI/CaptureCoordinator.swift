@@ -15,7 +15,9 @@ final class CaptureCoordinator {
     private var overlayWindows: [CaptureOverlayWindow] = []
     private var canvasViews: [CaptureCanvasView] = []
     private var ocrWindowController: OCRResultWindowController?
-    private(set) var isCapturing = false
+    private var captureGeneration: UInt64 = 0
+    private var captureTask: Task<Void, Never>?
+    private var preparingSince: Date?
 
     var onPinCountChanged: ((Int) -> Void)? {
         get { pinManager.onCountChanged }
@@ -30,36 +32,85 @@ final class CaptureCoordinator {
         pinManager.closeAll()
     }
 
-    func startRegionCapture(mode: CaptureMode = .standard) {
-        guard !isCapturing else {
-            overlayWindows.first?.makeKeyAndOrderFront(nil)
-            return
+    func resetIfStuck() {
+        captureGeneration &+= 1
+        captureTask?.cancel()
+        captureTask = nil
+        preparingSince = nil
+        if !overlayWindows.isEmpty || !canvasViews.isEmpty {
+            dismissAll()
         }
-        isCapturing = true
+    }
 
-        Task { @MainActor [weak self] in
+    func startRegionCapture(mode: CaptureMode = .standard) {
+        // 若已有遮罩窗口，先清理再开启新会话，避免切桌面后状态卡死
+        if !overlayWindows.isEmpty {
+            dismissAll()
+        }
+
+        if let started = preparingSince {
+            if Date().timeIntervalSince(started) < 1.5 {
+                return
+            }
+            captureTask?.cancel()
+            captureTask = nil
+            preparingSince = nil
+        }
+
+        captureGeneration &+= 1
+        let generation = captureGeneration
+        preparingSince = Date()
+
+        captureTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let displays = try await ScreenCaptureService.captureAllDisplays()
+                guard self.captureGeneration == generation else { return }
+                self.preparingSince = nil
+                self.captureTask = nil
                 self.presentOverlays(for: displays, mode: mode)
             } catch {
-                self.isCapturing = false
-                self.handleCaptureError(error)
+                guard self.captureGeneration == generation else { return }
+                self.preparingSince = nil
+                self.captureTask = nil
+                if !(error is CancellationError) {
+                    self.handleCaptureError(error)
+                }
             }
         }
     }
 
     func captureFullscreen() {
-        guard !isCapturing else { return }
-        isCapturing = true
+        if !overlayWindows.isEmpty {
+            dismissAll()
+        }
 
-        Task { @MainActor [weak self] in
+        if let started = preparingSince {
+            if Date().timeIntervalSince(started) < 1.5 {
+                return
+            }
+            captureTask?.cancel()
+            captureTask = nil
+            preparingSince = nil
+        }
+
+        captureGeneration &+= 1
+        let generation = captureGeneration
+        preparingSince = Date()
+
+        captureTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isCapturing = false }
+            defer {
+                if self.captureGeneration == generation {
+                    self.preparingSince = nil
+                    self.captureTask = nil
+                }
+            }
 
             do {
                 let mouseLocation = NSEvent.mouseLocation
                 let display = try await ScreenCaptureService.captureDisplay(containing: mouseLocation)
+                guard self.captureGeneration == generation else { return }
                 ImageExporter.copyToPasteboard(display.image)
 
                 if self.settings.autoSaveOnFullscreen {
@@ -77,7 +128,10 @@ final class CaptureCoordinator {
                     ToastPresenter.shared.show(message: "全屏截图已复制到剪贴板")
                 }
             } catch {
-                self.handleCaptureError(error)
+                guard self.captureGeneration == generation else { return }
+                if !(error is CancellationError) {
+                    self.handleCaptureError(error)
+                }
             }
         }
     }
@@ -93,7 +147,7 @@ final class CaptureCoordinator {
             window.orderOut(nil)
         }
         overlayWindows.removeAll()
-        isCapturing = false
+        preparingSince = nil
     }
 
     private func presentOverlays(for displays: [CapturedDisplay], mode: CaptureMode) {

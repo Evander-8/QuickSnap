@@ -157,6 +157,7 @@ private struct HotkeyRecorderRow: View {
     let title: String
     let subtitle: String
     @Binding var combo: HotkeyCombo
+    let onRecordingStateChanged: (Bool) -> Void
     @State private var isRecording = false
     @State private var eventMonitor: Any?
 
@@ -207,6 +208,7 @@ private struct HotkeyRecorderRow: View {
 
     private func startRecording() {
         isRecording = true
+        onRecordingStateChanged(true)
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             if event.keyCode == UInt16(kVK_Escape) {
                 stopRecording()
@@ -225,6 +227,9 @@ private struct HotkeyRecorderRow: View {
     }
 
     private func stopRecording() {
+        if isRecording {
+            onRecordingStateChanged(false)
+        }
         isRecording = false
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
@@ -278,6 +283,7 @@ private struct PreferencesView: View {
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var settings: SettingsStore
     let onHotkeysUpdated: () -> Void
+    let onRecordingStateChanged: (Bool) -> Void
 
     @State private var selectedTab: PreferencesTab = .general
     @State private var hoveredTab: PreferencesTab?
@@ -653,7 +659,8 @@ private struct PreferencesView: View {
                 HotkeyRecorderRow(
                     title: "区域截图",
                     subtitle: "悬停自动识别窗口，拖拽框选、标注、取色或贴图",
-                    combo: $settings.regionHotkey
+                    combo: $settings.regionHotkey,
+                    onRecordingStateChanged: onRecordingStateChanged
                 )
                 .onChange(of: settings.regionHotkey) { _, _ in onHotkeysUpdated() }
 
@@ -662,7 +669,8 @@ private struct PreferencesView: View {
                 HotkeyRecorderRow(
                     title: "OCR 文字识别",
                     subtitle: "选区完成后立即离线识别中英文文字",
-                    combo: $settings.ocrHotkey
+                    combo: $settings.ocrHotkey,
+                    onRecordingStateChanged: onRecordingStateChanged
                 )
                 .onChange(of: settings.ocrHotkey) { _, _ in onHotkeysUpdated() }
 
@@ -671,7 +679,8 @@ private struct PreferencesView: View {
                 HotkeyRecorderRow(
                     title: "全屏截图",
                     subtitle: "直接截取鼠标所在屏幕并复制到剪贴板",
-                    combo: $settings.fullscreenHotkey
+                    combo: $settings.fullscreenHotkey,
+                    onRecordingStateChanged: onRecordingStateChanged
                 )
                 .onChange(of: settings.fullscreenHotkey) { _, _ in onHotkeysUpdated() }
             }
@@ -773,17 +782,27 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private let settings: SettingsStore
     private let onHotkeysUpdated: () -> Void
+    private let onRecordingStateChanged: (Bool) -> Void
     var onDismissed: (() -> Void)?
 
-    init(settings: SettingsStore, onHotkeysUpdated: @escaping () -> Void) {
+    init(
+        settings: SettingsStore,
+        onHotkeysUpdated: @escaping () -> Void,
+        onRecordingStateChanged: @escaping (Bool) -> Void = { _ in }
+    ) {
         self.settings = settings
         self.onHotkeysUpdated = onHotkeysUpdated
+        self.onRecordingStateChanged = onRecordingStateChanged
         super.init()
     }
 
     func show() {
         if window == nil {
-            let view = PreferencesView(settings: settings, onHotkeysUpdated: onHotkeysUpdated)
+            let view = PreferencesView(
+                settings: settings,
+                onHotkeysUpdated: onHotkeysUpdated,
+                onRecordingStateChanged: onRecordingStateChanged
+            )
             let hosting = NSHostingView(rootView: view)
             hosting.wantsLayer = true
             hosting.layer?.backgroundColor = NSColor.clear.cgColor

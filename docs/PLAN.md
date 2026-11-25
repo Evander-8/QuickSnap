@@ -82,3 +82,11 @@
 - **偏好设置界面重构**（`PreferencesWindow`）：
   - 采用 macOS 原生双栏结构（左侧分类导航 + 右侧卡片分组：`通用`、`保存与命名`、`快捷键`、`关于与提示`）
   - 内置命名预设选择、可点击一键插入的占位符胶囊标签、以及实时文件名预览条
+
+## 九、Stage 9：消除截图卡死与快捷键失灵隐患
+
+- **屏幕捕获非阻塞超时保护**（`ScreenCaptureService` / `AsyncTimeout`）：使用 `OSAllocatedUnfairLock` + 竞态计时器封装 4 秒非阻塞超时，防止系统休眠唤醒或锁屏后 `ScreenCaptureKit` 挂死导致无限等待。
+- **协调器自愈状态机**（`CaptureCoordinator`）：以代数标识（`captureGeneration`）与 `preparingSince` 取代布尔锁；若超过 1.5 秒未完成或再次触发时存在旧遮罩窗口，自动取消旧请求并复位，杜绝永久卡死。
+- **高可靠热键与系统生命周期联动**（`HotkeyManager` / `AppDelegate`）：
+  - 热键注册由 `GetApplicationEventTarget()` 升级为 `GetEventDispatcherTarget()`，并支持快捷键录制期间临时挂起/恢复，防止按键冲突。
+  - 启动 2.5 秒后自动补注册（兜底开机自启过早窗口），并监听 `willSleep`、`didWake`、`screensDidWake`、`sessionDidBecomeActive`、`didChangeScreenParameters` 与 `com.apple.screenIsUnlocked` 自动复位状态与静默重注册热键。

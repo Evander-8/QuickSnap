@@ -73,3 +73,9 @@
 - [x] 补充命名规则与配置持久化单元测试、全部测试通过、固定证书签名重建 `dist/QuickSnap.dmg` 并重装启动 `/Applications/QuickSnap.app`
 - [x] 视觉精修 `PreferencesWindow`：移除暗灰底色，改用半透明 `.sidebar` 侧边栏、透明无边框标题栏、右侧 Switch 开关与原生浅色/深色自适应卡片
 - [x] 全透原生毛玻璃重绘 `PreferencesWindow`（`.sidebar` + `.popover` 双层 behindWindow 毛玻璃、透明无底窗口、高光细描边玻璃卡片与极简 SF Symbol 导航）
+
+## Stage 9：消除截图卡死与快捷键失灵隐患
+- [x] 为 `ScreenCaptureService` 增加非阻塞超时保护（`AsyncTimeout`，4 秒超时防 `ScreenCaptureKit` 挂死）及单元测试
+- [x] 重构 `CaptureCoordinator` 状态机（防 `isCapturing` 永久锁死、超时复位、休眠与显示器变更自动清理遮罩、重复触发自愈）
+- [x] 升级 `HotkeyManager` 改用 `GetEventDispatcherTarget()`，支持录制期暂停/恢复；`AppDelegate` 增加开机延迟补注册、休眠唤醒/屏醒/锁屏解锁自动重注册
+- [x] 全部单元测试通过、固定证书签名重建 `dist/QuickSnap.dmg` 并重装启动 `/Applications/QuickSnap.app`

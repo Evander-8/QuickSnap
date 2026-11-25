@@ -1,14 +1,64 @@
 /**
- * [INPUT]: 依赖 ScreenCaptureKit、AppKit（NSScreen）、CoreGraphics（权限检测）
- * [OUTPUT]: 提供 CapturedDisplay 与 ScreenCaptureService（多屏 Retina 截图与屏幕录制权限管理）
- * [POS]: QuickSnapCore 的屏幕捕获边界，屏蔽 ScreenCaptureKit 异步细节与多显示器坐标映射
+ * [INPUT]: 依赖 ScreenCaptureKit、AppKit（NSScreen）、CoreGraphics、os（OSAllocatedUnfairLock）
+ * [OUTPUT]: 提供 AsyncTimeout、DetectedWindow、CapturedDisplay 与带超时保护的 ScreenCaptureService
+ * [POS]: QuickSnapCore 的屏幕捕获边界，屏蔽 ScreenCaptureKit 异步挂死风险与多显示器坐标映射
  * [PROTOCOL]: Update this header on change, then check GEMINI.md
  */
 
 import AppKit
 import CoreGraphics
 import Foundation
+import os
 import ScreenCaptureKit
+
+public enum AsyncTimeout {
+    public static func run<T: Sendable>(
+        seconds: TimeInterval,
+        timeoutError: Error,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            let settled = OSAllocatedUnfairLock(initialState: false)
+
+            let workTask = Task {
+                do {
+                    let value = try await operation()
+                    let shouldResume = settled.withLock { done -> Bool in
+                        if done { return false }
+                        done = true
+                        return true
+                    }
+                    if shouldResume {
+                        continuation.resume(returning: value)
+                    }
+                } catch {
+                    let shouldResume = settled.withLock { done -> Bool in
+                        if done { return false }
+                        done = true
+                        return true
+                    }
+                    if shouldResume {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+
+            Task {
+                let nanos = UInt64(max(0.05, seconds) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanos)
+                let shouldTimeout = settled.withLock { done -> Bool in
+                    if done { return false }
+                    done = true
+                    return true
+                }
+                if shouldTimeout {
+                    workTask.cancel()
+                    continuation.resume(throwing: timeoutError)
+                }
+            }
+        }
+    }
+}
 
 public struct DetectedWindow: Equatable, Sendable {
     public let ownerName: String
@@ -42,9 +92,10 @@ public struct CapturedDisplay: @unchecked Sendable {
     }
 }
 
-public enum ScreenCaptureError: Error, LocalizedError {
+public enum ScreenCaptureError: Error, LocalizedError, Equatable {
     case permissionDenied
     case noDisplayFound
+    case timedOut
     case captureFailed(String)
 
     public var errorDescription: String? {
@@ -53,13 +104,24 @@ public enum ScreenCaptureError: Error, LocalizedError {
             return "未获得“屏幕录制”权限，请在系统设置中授权 QuickSnap。"
         case .noDisplayFound:
             return "未检测到可用的显示器。"
+        case .timedOut:
+            return "屏幕捕获超时，请重试（如持续异常请重新授权屏幕录制权限）。"
         case .captureFailed(let message):
             return "屏幕捕获失败：\(message)"
         }
     }
 }
 
+private struct ScreenSnapshot: Sendable {
+    let displayID: CGDirectDisplayID
+    let frame: CGRect
+    let scale: CGFloat
+    let windows: [DetectedWindow]
+}
+
 public enum ScreenCaptureService {
+    private static let captureTimeoutSeconds: TimeInterval = 4.0
+
     public static func hasScreenRecordingPermission() -> Bool {
         CGPreflightScreenCaptureAccess()
     }
@@ -83,20 +145,6 @@ public enum ScreenCaptureService {
             throw ScreenCaptureError.permissionDenied
         }
 
-        let content: SCShareableContent
-        do {
-            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        } catch {
-            throw ScreenCaptureError.captureFailed(error.localizedDescription)
-        }
-
-        let screensByID = Dictionary(
-            uniqueKeysWithValues: NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, NSScreen)? in
-                guard let id = displayID(for: screen) else { return nil }
-                return (id, screen)
-            }
-        )
-
         let rawWindowInfos = (CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
@@ -104,48 +152,74 @@ public enum ScreenCaptureService {
         let primaryHeight = NSScreen.screens.first?.frame.height ?? NSScreen.main?.frame.height ?? 0
         let selfPID = ProcessInfo.processInfo.processIdentifier
 
-        var captured: [CapturedDisplay] = []
-        for display in content.displays {
-            let screen = screensByID[display.displayID]
-            let frame = screen?.frame ?? display.frame
-            let scale = screen?.backingScaleFactor ?? 2.0
-            let detectedWindows = extractDetectedWindows(
+        var snapshotsByID: [CGDirectDisplayID: ScreenSnapshot] = [:]
+        for screen in NSScreen.screens {
+            guard let id = displayID(for: screen) else { continue }
+            let windows = extractDetectedWindows(
                 from: rawWindowInfos,
-                displayFrame: frame,
+                displayFrame: screen.frame,
                 primaryHeight: primaryHeight,
                 excludingPID: selfPID
             )
+            snapshotsByID[id] = ScreenSnapshot(
+                displayID: id,
+                frame: screen.frame,
+                scale: screen.backingScaleFactor,
+                windows: windows
+            )
+        }
 
-            let filter = SCContentFilter(display: display, excludingWindows: [])
-            let config = SCStreamConfiguration()
-            config.width = max(1, Int((frame.width * scale).rounded()))
-            config.height = max(1, Int((frame.height * scale).rounded()))
-            config.showsCursor = false
-            config.capturesAudio = false
-
+        let snapshots = snapshotsByID
+        return try await AsyncTimeout.run(
+            seconds: captureTimeoutSeconds,
+            timeoutError: ScreenCaptureError.timedOut
+        ) {
+            let content: SCShareableContent
             do {
-                let image = try await SCScreenshotManager.captureImage(
-                    contentFilter: filter,
-                    configuration: config
-                )
-                captured.append(
-                    CapturedDisplay(
-                        displayID: display.displayID,
-                        screenFrame: frame,
-                        backingScaleFactor: scale,
-                        image: image,
-                        windows: detectedWindows
-                    )
-                )
+                content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             } catch {
                 throw ScreenCaptureError.captureFailed(error.localizedDescription)
             }
-        }
 
-        if captured.isEmpty {
-            throw ScreenCaptureError.noDisplayFound
+            var captured: [CapturedDisplay] = []
+            for display in content.displays {
+                try Task.checkCancellation()
+                let snapshot = snapshots[display.displayID]
+                let frame = snapshot?.frame ?? display.frame
+                let scale = snapshot?.scale ?? 2.0
+                let windows = snapshot?.windows ?? []
+
+                let filter = SCContentFilter(display: display, excludingWindows: [])
+                let config = SCStreamConfiguration()
+                config.width = max(1, Int((frame.width * scale).rounded()))
+                config.height = max(1, Int((frame.height * scale).rounded()))
+                config.showsCursor = false
+                config.capturesAudio = false
+
+                do {
+                    let image = try await SCScreenshotManager.captureImage(
+                        contentFilter: filter,
+                        configuration: config
+                    )
+                    captured.append(
+                        CapturedDisplay(
+                            displayID: display.displayID,
+                            screenFrame: frame,
+                            backingScaleFactor: scale,
+                            image: image,
+                            windows: windows
+                        )
+                    )
+                } catch {
+                    throw ScreenCaptureError.captureFailed(error.localizedDescription)
+                }
+            }
+
+            if captured.isEmpty {
+                throw ScreenCaptureError.noDisplayFound
+            }
+            return captured
         }
-        return captured
     }
 
     @MainActor
@@ -160,30 +234,50 @@ public enum ScreenCaptureService {
             throw ScreenCaptureError.noDisplayFound
         }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first(where: { $0.displayID == targetID }) ?? content.displays.first else {
-            throw ScreenCaptureError.noDisplayFound
+        let snapshot = ScreenSnapshot(
+            displayID: targetID,
+            frame: screen.frame,
+            scale: screen.backingScaleFactor,
+            windows: []
+        )
+
+        return try await AsyncTimeout.run(
+            seconds: captureTimeoutSeconds,
+            timeoutError: ScreenCaptureError.timedOut
+        ) {
+            let content: SCShareableContent
+            do {
+                content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            } catch {
+                throw ScreenCaptureError.captureFailed(error.localizedDescription)
+            }
+
+            guard let display = content.displays.first(where: { $0.displayID == snapshot.displayID }) ?? content.displays.first else {
+                throw ScreenCaptureError.noDisplayFound
+            }
+
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let config = SCStreamConfiguration()
+            config.width = max(1, Int((snapshot.frame.width * snapshot.scale).rounded()))
+            config.height = max(1, Int((snapshot.frame.height * snapshot.scale).rounded()))
+            config.showsCursor = false
+            config.capturesAudio = false
+
+            do {
+                let image = try await SCScreenshotManager.captureImage(
+                    contentFilter: filter,
+                    configuration: config
+                )
+                return CapturedDisplay(
+                    displayID: display.displayID,
+                    screenFrame: snapshot.frame,
+                    backingScaleFactor: snapshot.scale,
+                    image: image
+                )
+            } catch {
+                throw ScreenCaptureError.captureFailed(error.localizedDescription)
+            }
         }
-
-        let scale = screen.backingScaleFactor
-        let filter = SCContentFilter(display: display, excludingWindows: [])
-        let config = SCStreamConfiguration()
-        config.width = max(1, Int((screen.frame.width * scale).rounded()))
-        config.height = max(1, Int((screen.frame.height * scale).rounded()))
-        config.showsCursor = false
-        config.capturesAudio = false
-
-        let image = try await SCScreenshotManager.captureImage(
-            contentFilter: filter,
-            configuration: config
-        )
-
-        return CapturedDisplay(
-            displayID: display.displayID,
-            screenFrame: screen.frame,
-            backingScaleFactor: scale,
-            image: image
-        )
     }
 
     private static func displayID(for screen: NSScreen) -> CGDirectDisplayID? {

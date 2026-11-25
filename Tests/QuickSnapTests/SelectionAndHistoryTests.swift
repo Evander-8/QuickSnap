@@ -207,4 +207,27 @@ final class SelectionAndHistoryTests: XCTestCase {
         history.redo()
         XCTAssertEqual(history.nextStepNumber, 3)
     }
+
+    func testAsyncTimeoutResolvesFastAndRejectsHungOperation() async throws {
+        let fastResult = try await AsyncTimeout.run(
+            seconds: 1.0,
+            timeoutError: ScreenCaptureError.timedOut
+        ) {
+            return 42
+        }
+        XCTAssertEqual(fastResult, 42)
+
+        do {
+            let _: Int = try await AsyncTimeout.run(
+                seconds: 0.12,
+                timeoutError: ScreenCaptureError.timedOut
+            ) {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                return 99
+            }
+            XCTFail("Expected ScreenCaptureError.timedOut")
+        } catch let error as ScreenCaptureError {
+            XCTAssertEqual(error, .timedOut)
+        }
+    }
 }

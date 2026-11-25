@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 Carbon.HIToolbox（RegisterEventHotKey/InstallEventHandler）与 SettingsStore.HotkeyCombo
- * [OUTPUT]: 提供 HotkeyAction 枚举与 HotkeyManager 全局快捷键管理器（无需辅助功能权限）
+ * [INPUT]: 依赖 Carbon.HIToolbox（RegisterEventHotKey/InstallEventHandler/GetEventDispatcherTarget）与 SettingsStore.HotkeyCombo
+ * [OUTPUT]: 提供 HotkeyAction 枚举与高可靠 HotkeyManager 全局快捷键管理器（无需辅助功能权限，支持暂停与重注册）
  * [POS]: QuickSnapCore 的全局热键引擎，负责将系统快捷键事件路由至截图与 OCR 协调器
  * [PROTOCOL]: Update this header on change, then check GEMINI.md
  */
@@ -27,6 +27,8 @@ public final class HotkeyManager {
 
     private var eventHandlerRef: EventHandlerRef?
     private var hotKeyRefs: [HotkeyAction: EventHotKeyRef] = [:]
+    private var lastCombos: (region: HotkeyCombo, ocr: HotkeyCombo, fullscreen: HotkeyCombo)?
+    private var isSuspended = false
 
     public var onTrigger: ((HotkeyAction) -> Void)?
 
@@ -48,9 +50,13 @@ public final class HotkeyManager {
         ocr: HotkeyCombo,
         fullscreen: HotkeyCombo
     ) -> [HotkeyAction] {
+        lastCombos = (region, ocr, fullscreen)
+        installHandlerIfNeeded()
         unregisterAll()
-        var failed: [HotkeyAction] = []
 
+        guard !isSuspended else { return [] }
+
+        var failed: [HotkeyAction] = []
         if !register(action: .regionCapture, combo: region) {
             failed.append(.regionCapture)
         }
@@ -61,6 +67,16 @@ public final class HotkeyManager {
             failed.append(.fullscreenCapture)
         }
         return failed
+    }
+
+    public func setSuspended(_ suspended: Bool) {
+        guard isSuspended != suspended else { return }
+        isSuspended = suspended
+        if suspended {
+            unregisterAll()
+        } else if let combos = lastCombos {
+            _ = registerAll(region: combos.region, ocr: combos.ocr, fullscreen: combos.fullscreen)
+        }
     }
 
     public func unregisterAll() {
@@ -77,7 +93,7 @@ public final class HotkeyManager {
             combo.keyCode,
             combo.modifiers,
             hotKeyID,
-            GetApplicationEventTarget(),
+            GetEventDispatcherTarget(),
             0,
             &hotKeyRef
         )
@@ -97,7 +113,7 @@ public final class HotkeyManager {
         let userData = Unmanaged.passUnretained(self).toOpaque()
         var handler: EventHandlerRef?
         let status = InstallEventHandler(
-            GetApplicationEventTarget(),
+            GetEventDispatcherTarget(),
             { _, event, userData -> OSStatus in
                 guard let event, let userData else { return noErr }
                 var hotKeyID = EventHotKeyID()

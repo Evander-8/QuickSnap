@@ -45,22 +45,22 @@ public struct HotkeyCombo: Codable, Equatable, Sendable {
         self.modifiers = modifiers
     }
 
-    // ⌘⇧A (kVK_ANSI_A = 0x00)
+    // ⌃1 (kVK_ANSI_1 = 0x12)
     public static let defaultRegionCapture = HotkeyCombo(
-        keyCode: UInt32(kVK_ANSI_A),
-        modifiers: UInt32(cmdKey | shiftKey)
+        keyCode: UInt32(kVK_ANSI_1),
+        modifiers: UInt32(controlKey)
     )
 
-    // ⌘⇧O (kVK_ANSI_O = 0x1F)
+    // ⌃2 (kVK_ANSI_2 = 0x13)
     public static let defaultOCRCapture = HotkeyCombo(
-        keyCode: UInt32(kVK_ANSI_O),
-        modifiers: UInt32(cmdKey | shiftKey)
+        keyCode: UInt32(kVK_ANSI_2),
+        modifiers: UInt32(controlKey)
     )
 
-    // ⌘⇧F (kVK_ANSI_F = 0x03)
+    // ⌃3 (kVK_ANSI_3 = 0x14)
     public static let defaultFullscreenCapture = HotkeyCombo(
-        keyCode: UInt32(kVK_ANSI_F),
-        modifiers: UInt32(cmdKey | shiftKey)
+        keyCode: UInt32(kVK_ANSI_3),
+        modifiers: UInt32(controlKey)
     )
 
     public static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
