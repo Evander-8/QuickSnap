@@ -4,7 +4,7 @@ Swift 5.10 + macOS 14.0+ + AppKit + SwiftUI + ScreenCaptureKit + Vision + Carbon
 <directory>
 docs/ - 持久化实施计划与功能进度清单（PLAN.md、CHECKLIST.md）
 Sources/QuickSnapCore/ - 核心无界面业务逻辑层（配置、热键、标注模型与渲染、像素取色、自启服务、截屏、OCR、导出）
-Sources/QuickSnap/ - 应用壳、多屏截图遮罩画布与按需弹窗（App、CaptureUI、Panels）
+Sources/QuickSnap/ - 应用壳、Liquid Glass 设计系统、多屏截图遮罩画布与按需弹窗（App、Design、CaptureUI、Panels）
 Resources/ - 应用 Bundle 元信息（Info.plist）与图标资源（AppIcon.icns）
 Tests/QuickSnapTests/ - 核心算法、像素取色、图像导出与 Vision OCR 自动化测试
 scripts/ - 图标生成、.app 组装签名与 .dmg 打包脚本

@@ -91,6 +91,7 @@ public enum ImageExporter {
             annotations: annotations,
             in: context,
             mosaicThumbnail: effectiveMosaic,
+            sourceImage: sourceImage,
             canvasBounds: canvasBounds
         )
         context.restoreGState()

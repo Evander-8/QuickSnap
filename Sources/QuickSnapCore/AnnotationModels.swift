@@ -18,6 +18,7 @@ public enum AnnotationTool: String, CaseIterable, Sendable {
     case brush
     case highlighter
     case mosaic
+    case magnifier
     case text
     case stepNumber
 
@@ -30,6 +31,7 @@ public enum AnnotationTool: String, CaseIterable, Sendable {
         case .brush: return "画笔"
         case .highlighter: return "荧光笔"
         case .mosaic: return "马赛克"
+        case .magnifier: return "放大镜"
         case .text: return "文字"
         case .stepNumber: return "序号"
         }
@@ -44,13 +46,14 @@ public enum AnnotationTool: String, CaseIterable, Sendable {
         case .brush: return "scribble.variable"
         case .highlighter: return "highlighter"
         case .mosaic: return "checkerboard.rectangle"
+        case .magnifier: return "plus.magnifyingglass"
         case .text: return "textformat"
         case .stepNumber: return "1.circle"
         }
     }
 
     public static var drawableTools: [AnnotationTool] {
-        [.rectangle, .ellipse, .arrow, .brush, .highlighter, .mosaic, .text, .stepNumber]
+        [.rectangle, .ellipse, .arrow, .brush, .highlighter, .mosaic, .magnifier, .text, .stepNumber]
     }
 }
 
@@ -107,6 +110,7 @@ public struct AnnotationItem: Identifiable, Equatable, Sendable {
     public var text: String
     public var fontSize: CGFloat
     public var stepNumber: Int
+    public var magnification: CGFloat
 
     public init(
         id: UUID = UUID(),
@@ -118,7 +122,8 @@ public struct AnnotationItem: Identifiable, Equatable, Sendable {
         points: [CGPoint] = [],
         text: String = "",
         fontSize: CGFloat = 18,
-        stepNumber: Int = 1
+        stepNumber: Int = 1,
+        magnification: CGFloat = 2.2
     ) {
         self.id = id
         self.tool = tool
@@ -130,6 +135,7 @@ public struct AnnotationItem: Identifiable, Equatable, Sendable {
         self.text = text
         self.fontSize = fontSize
         self.stepNumber = stepNumber
+        self.magnification = magnification
     }
 }
 
@@ -163,6 +169,20 @@ public struct AnnotationHistory: Sendable {
         guard let item = redoStack.popLast() else { return nil }
         items.append(item)
         return item
+    }
+
+    @discardableResult
+    public mutating func update(id: UUID, _ mutate: (inout AnnotationItem) -> Void) -> Bool {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return false }
+        mutate(&items[index])
+        return true
+    }
+
+    @discardableResult
+    public mutating func remove(id: UUID) -> AnnotationItem? {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return nil }
+        redoStack.removeAll()
+        return items.remove(at: index)
     }
 
     public mutating func clear() {

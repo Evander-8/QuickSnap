@@ -230,4 +230,27 @@ final class SelectionAndHistoryTests: XCTestCase {
             XCTAssertEqual(error, .timedOut)
         }
     }
+
+    func testAnnotationHistoryUpdateAndRemove() {
+        var history = AnnotationHistory()
+        let first = AnnotationItem(tool: .magnifier, color: .red, strokeWidth: 4, startPoint: CGPoint(x: 10, y: 10), endPoint: CGPoint(x: 78, y: 10), magnification: 2.2)
+        let second = AnnotationItem(tool: .rectangle, color: .blue, strokeWidth: 4)
+        history.append(first)
+        history.append(second)
+
+        let updated = history.update(id: first.id) { item in
+            item.startPoint = CGPoint(x: 50, y: 60)
+            item.magnification = 3.5
+        }
+        XCTAssertTrue(updated)
+        XCTAssertEqual(history.items.first?.startPoint, CGPoint(x: 50, y: 60))
+        XCTAssertEqual(history.items.first?.magnification, 3.5)
+
+        XCTAssertFalse(history.update(id: UUID()) { _ in })
+
+        let removed = history.remove(id: first.id)
+        XCTAssertEqual(removed?.id, first.id)
+        XCTAssertEqual(history.items.map(\.id), [second.id])
+        XCTAssertNil(history.remove(id: first.id))
+    }
 }

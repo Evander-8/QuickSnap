@@ -46,24 +46,6 @@ private enum PreferencesTab: String, CaseIterable, Identifiable {
     }
 }
 
-private struct NativeGlassView: NSViewRepresentable {
-    let material: NSVisualEffectView.Material
-
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material
-        view.blendingMode = .behindWindow
-        view.state = .active
-        return view
-    }
-
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.blendingMode = .behindWindow
-        nsView.state = .active
-    }
-}
-
 private struct GlassSectionCard<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     let title: String?
@@ -80,32 +62,20 @@ private struct GlassSectionCard<Content: View>: View {
                 Text(title)
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(.secondary)
-                    .padding(.leading, 4)
+                    .padding(.leading, 6)
             }
 
             VStack(alignment: .leading, spacing: 0) {
                 content
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(colorScheme == .dark ? Color.white.opacity(0.065) : Color.white.opacity(0.46))
+            .liquidGlassSurface(
+                cornerRadius: 20,
+                darkTint: Color.white.opacity(0.065),
+                lightTint: Color.white.opacity(0.78),
+                withBehindWindowBlur: false,
+                showShadow: true
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(colorScheme == .dark ? 0.18 : 0.78),
-                                Color.primary.opacity(0.08)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.75
-                    )
-            )
-            .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.18 : 0.04), radius: 6, y: 2)
         }
     }
 }
@@ -328,21 +298,47 @@ private struct PreferencesView: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 7)
                         .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
                                 .fill(
                                     isSelected
-                                        ? (colorScheme == .dark ? Color.white.opacity(0.11) : Color.white.opacity(0.55))
+                                        ? (colorScheme == .dark ? Color.white.opacity(0.11) : Color.white.opacity(0.80))
                                         : (isHovered ? Color.primary.opacity(0.05) : Color.clear)
                                 )
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
                                 .strokeBorder(
-                                    isSelected
-                                        ? Color.white.opacity(colorScheme == .dark ? 0.14 : 0.72)
-                                        : Color.clear,
-                                    lineWidth: 0.5
+                                    AngularGradient(
+                                        gradient: Gradient(
+                                            colors: LiquidGlassTokens.chromaticSwiftUIColors(
+                                                for: colorScheme,
+                                                opacity: isSelected ? (colorScheme == .dark ? 0.44 : 0.36) : 0
+                                            )
+                                        ),
+                                        center: .center
+                                    ),
+                                    lineWidth: 0.85
                                 )
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.white.opacity(isSelected ? 0.92 : 0),
+                                            Color.clear
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .center
+                                    ),
+                                    lineWidth: 0.9
+                                )
+                                .padding(0.5)
+                        )
+                        .shadow(
+                            color: Color.black.opacity(isSelected ? (colorScheme == .dark ? 0.22 : 0.07) : 0),
+                            radius: 5,
+                            y: 2
                         )
                         .contentShape(Rectangle())
                     }
@@ -375,7 +371,13 @@ private struct PreferencesView: View {
         .padding(.vertical, 10)
         .frame(width: 172)
         .frame(maxHeight: .infinity)
-        .background(NativeGlassView(material: .sidebar).ignoresSafeArea())
+        .background(
+            ZStack {
+                NativeVisualEffectBackground(material: .sidebar)
+                Color.white.opacity(colorScheme == .dark ? 0 : 0.14)
+            }
+            .ignoresSafeArea()
+        )
     }
 
     private var detailContent: some View {
@@ -412,7 +414,13 @@ private struct PreferencesView: View {
             .scrollContentBackground(.hidden)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(NativeGlassView(material: .popover).ignoresSafeArea())
+        .background(
+            ZStack {
+                NativeVisualEffectBackground(material: colorScheme == .dark ? .popover : .sheet)
+                Color.white.opacity(colorScheme == .dark ? 0 : 0.50)
+            }
+            .ignoresSafeArea()
+        )
     }
 
     // MARK: - 通用

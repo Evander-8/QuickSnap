@@ -29,6 +29,7 @@ let package = Package(
             exclude: [
                 "App/GEMINI.md",
                 "CaptureUI/GEMINI.md",
+                "Design/GEMINI.md",
                 "Panels/GEMINI.md"
             ]
         ),

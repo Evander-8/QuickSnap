@@ -16,11 +16,6 @@ private final class PinnedPanel: NSPanel {
 }
 
 @MainActor
-private final class FirstMouseVisualEffectView: NSVisualEffectView {
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-}
-
-@MainActor
 private final class FirstMouseButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
@@ -37,7 +32,14 @@ private final class PinnedImageContentView: NSView {
     private var cgImage: CGImage?
     private let initialSize: CGSize
     private let borderLayer = CALayer()
-    private let hoverBar = FirstMouseVisualEffectView()
+    private let hoverBar = LiquidGlassBackdropView(
+        material: .hudWindow,
+        blendingMode: .withinWindow,
+        preferredRadius: 16,
+        darkTintAlpha: 0.36,
+        forceDarkAppearance: true,
+        acceptsFirstMouseClick: true
+    )
     private let scalePill = NSTextField(labelWithString: "100%")
     private var scaleHideWorkItem: DispatchWorkItem?
 
@@ -343,22 +345,13 @@ private final class PinnedImageContentView: NSView {
     }
 
     private func setupHoverBar() {
-        hoverBar.material = .hudWindow
-        hoverBar.blendingMode = .withinWindow
-        hoverBar.state = .active
-        hoverBar.appearance = NSAppearance(named: .darkAqua)
-        hoverBar.wantsLayer = true
-        hoverBar.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.58).cgColor
-        hoverBar.layer?.cornerRadius = 7
-        hoverBar.layer?.borderWidth = 0.5
-        hoverBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.2).cgColor
         hoverBar.alphaValue = 0
         hoverBar.translatesAutoresizingMaskIntoConstraints = false
 
         let stack = NSStackView()
         stack.orientation = .horizontal
         stack.spacing = 2
-        stack.edgeInsets = NSEdgeInsets(top: 2, left: 4, bottom: 2, right: 4)
+        stack.edgeInsets = NSEdgeInsets(top: 3, left: 6, bottom: 3, right: 6)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         stack.addArrangedSubview(makeMiniButton(symbol: "doc.on.doc", tooltip: "复制图片 (⌘C)", action: #selector(handleCopy)))
@@ -366,14 +359,14 @@ private final class PinnedImageContentView: NSView {
         stack.addArrangedSubview(makeMiniButton(symbol: "text.viewfinder", tooltip: "OCR 文字识别", action: #selector(handleOCR)))
         stack.addArrangedSubview(makeMiniButton(symbol: "xmark", tooltip: "关闭贴图 (Esc)", action: #selector(handleClose)))
 
-        hoverBar.addSubview(stack)
+        hoverBar.contentContainer.addSubview(stack)
         addSubview(hoverBar)
 
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: hoverBar.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: hoverBar.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: hoverBar.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: hoverBar.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: hoverBar.contentContainer.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: hoverBar.contentContainer.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: hoverBar.contentContainer.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: hoverBar.contentContainer.bottomAnchor),
 
             hoverBar.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             hoverBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6)
@@ -385,8 +378,11 @@ private final class PinnedImageContentView: NSView {
         scalePill.textColor = .white
         scalePill.alignment = .center
         scalePill.wantsLayer = true
-        scalePill.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
-        scalePill.layer?.cornerRadius = 9
+        scalePill.layer?.backgroundColor = NSColor(calibratedRed: 0.08, green: 0.10, blue: 0.14, alpha: 0.72).cgColor
+        scalePill.layer?.cornerRadius = 10
+        scalePill.layer?.cornerCurve = .continuous
+        scalePill.layer?.borderWidth = 0.75
+        scalePill.layer?.borderColor = NSColor.white.withAlphaComponent(0.45).cgColor
         scalePill.alphaValue = 0
         scalePill.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scalePill)

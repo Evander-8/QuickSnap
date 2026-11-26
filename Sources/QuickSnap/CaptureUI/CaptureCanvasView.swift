@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 AppKit、CoreGraphics、QuickSnapCore（CapturedDisplay、AnnotationModels、AnnotationRenderer）
- * [OUTPUT]: 提供 CaptureMode 与 CaptureCanvasView（冻结屏幕、选区调整、8 向手柄、标注绘制与惰性马赛克）
+ * [OUTPUT]: 提供 CaptureMode 与 CaptureCanvasView（冻结屏幕、选区调整、8 向手柄、标注绘制、局部分镜放大与惰性马赛克）
  * [POS]: CaptureUI 的核心交互画布，采用翻转坐标系与共享渲染器实现零卡顿所见即所得
  * [PROTOCOL]: Update this header on change, then check GEMINI.md
  */
@@ -22,6 +22,9 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
         case movingSelection(lastPoint: CGPoint)
         case resizingSelection(handle: SelectionHandle)
         case drawingAnnotation(AnnotationItem)
+        case movingMagnifier(id: UUID, offset: CGSize)
+        case resizingMagnifier(id: UUID)
+        case zoomingMagnifier(id: UUID)
     }
 
     let display: CapturedDisplay
@@ -47,6 +50,40 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
     private var pendingClickWindow: DetectedWindow?
     private var pointerLocation: CGPoint?
     private var useRGBFormat = false
+    private var liveMagnifierRadius: CGFloat = AnnotationRenderer.defaultMagnifierRadius
+    private var liveMagnifierZoom: CGFloat = 2.2
+    private var selectedMagnifierID: UUID?
+
+    private static let transparentCursor: NSCursor = {
+        let img = NSImage(size: NSSize(width: 1, height: 1))
+        return NSCursor(image: img, hotSpot: .zero)
+    }()
+
+    // 预缓存 HUD 字体与属性字典：避免高频重绘反复触发 CoreText 属性字典构建引发 macOS 15 异常
+    private static let hudMagnifierBadgeAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
+        .foregroundColor: NSColor.white
+    ]
+    private static let hudHintAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+        .foregroundColor: NSColor.white
+    ]
+    private static let hudSizeBadgeAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
+        .foregroundColor: NSColor.white
+    ]
+    private static let hudWindowBadgeAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+        .foregroundColor: NSColor.white
+    ]
+    private static let hudLoupeColorAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
+        .foregroundColor: NSColor.white
+    ]
+    private static let hudLoupeSubAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 9.5, weight: .regular),
+        .foregroundColor: NSColor.white.withAlphaComponent(0.68)
+    ]
 
     private let toolbarView = FloatingToolbarView()
     private var textContainer: NSView?
@@ -76,6 +113,9 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
         inProgressItem = nil
         history.clear()
         activeTool = .none
+        liveMagnifierRadius = AnnotationRenderer.defaultMagnifierRadius
+        liveMagnifierZoom = 2.2
+        selectedMagnifierID = nil
         toolbarView.isHidden = true
         syncToolbarState()
         needsDisplay = true
@@ -93,6 +133,9 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
         pendingClickWindow = nil
         pointerLocation = nil
         selectionRect = nil
+        liveMagnifierRadius = AnnotationRenderer.defaultMagnifierRadius
+        liveMagnifierZoom = 2.2
+        selectedMagnifierID = nil
         onSelectionBegan = nil
         onRequestCopy = nil
         onRequestSave = nil
@@ -110,6 +153,22 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
             owner: self,
             userInfo: nil
         ))
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        let screenMouse = NSEvent.mouseLocation
+        if display.screenFrame.contains(screenMouse) {
+            let winPoint = window.convertPoint(fromScreen: screenMouse)
+            let localPoint = clampToBounds(convert(winPoint, from: nil))
+            pointerLocation = localPoint
+            if selectionRect == nil {
+                hoveredWindow = display.windows.first(where: { $0.frameInDisplay.contains(localPoint) })
+            }
+            updateCursor(at: localPoint)
+            needsDisplay = true
+        }
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -148,6 +207,7 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
                 annotations: history.items,
                 in: ctx,
                 mosaicThumbnail: mosaicThumbnail,
+                sourceImage: display.image,
                 canvasBounds: bounds
             )
             if let inProgressItem {
@@ -155,6 +215,16 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
                     item: inProgressItem,
                     in: ctx,
                     mosaicThumbnail: mosaicThumbnail,
+                    sourceImage: display.image,
+                    canvasBounds: bounds
+                )
+            }
+            if shouldShowLiveToolMagnifier(), let pointer = pointerLocation {
+                AnnotationRenderer.draw(
+                    item: makeLiveMagnifierItem(at: pointer),
+                    in: ctx,
+                    mosaicThumbnail: mosaicThumbnail,
+                    sourceImage: display.image,
                     canvasBounds: bounds
                 )
             }
@@ -162,6 +232,30 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
 
             // 4. 绘制选区边框、8 向调整手柄与实时像素尺寸标签
             drawSelectionChrome(rect: rect, in: ctx)
+
+            if let selected = selectedMagnifierItem() {
+                AnnotationRenderer.drawMagnifierSelectionHandles(for: selected, in: ctx)
+                switch interaction {
+                case .movingMagnifier(let id, _) where id == selected.id,
+                     .resizingMagnifier(let id) where id == selected.id,
+                     .zoomingMagnifier(let id) where id == selected.id:
+                    drawLiveMagnifierBadge(
+                        center: selected.startPoint,
+                        radius: AnnotationRenderer.magnifierRadius(for: selected),
+                        zoom: selected.magnification,
+                        in: ctx
+                    )
+                default:
+                    break
+                }
+            } else if shouldShowLiveToolMagnifier(), let pointer = pointerLocation {
+                drawLiveMagnifierBadge(
+                    center: pointer,
+                    radius: liveMagnifierRadius,
+                    zoom: liveMagnifierZoom,
+                    in: ctx
+                )
+            }
         } else {
             if let win = hoveredWindow {
                 drawHoveredWindowChrome(win, in: ctx)
@@ -179,17 +273,45 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
 
+        if !toolbarView.isHidden && toolbarView.frame.contains(point) {
+            return
+        }
+
         if textContainer != nil {
             commitPendingTextIfNeeded()
         }
 
-        if let rect = selectionRect, event.clickCount == 2, activeTool == .none, rect.contains(point) {
+        if let rect = selectionRect,
+           event.clickCount == 2,
+           activeTool == .none,
+           selectedMagnifierID == nil,
+           hoveredMagnifierID(at: point) == nil,
+           rect.contains(point) {
             triggerCopy()
             return
         }
 
         if let rect = selectionRect {
+            // 优先命中已选中放大镜的手柄（蓝/绿点）或本体，支持略超选区边界的边缘手柄拖拽
+            if let selected = selectedMagnifierItem(),
+               let part = AnnotationRenderer.hitTestMagnifier(at: point, item: selected) {
+                switch part {
+                case .sizeHandle:
+                    interaction = .resizingMagnifier(id: selected.id)
+                case .zoomHandle:
+                    interaction = .zoomingMagnifier(id: selected.id)
+                case .body:
+                    let offset = CGSize(width: point.x - selected.startPoint.x, height: point.y - selected.startPoint.y)
+                    interaction = .movingMagnifier(id: selected.id, offset: offset)
+                }
+                updateCursor(at: point)
+                needsDisplay = true
+                return
+            }
+
             if let handle = SelectionMath.hitTestHandle(point, rect: rect) {
+                selectedMagnifierID = nil
+                syncToolbarState()
                 interaction = .resizingSelection(handle: handle)
                 toolbarView.isHidden = true
                 return
@@ -197,10 +319,12 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
 
             if activeTool != .none, rect.contains(point) {
                 if activeTool == .text {
+                    selectedMagnifierID = nil
                     openInlineTextEditor(at: point, inside: rect)
                     return
                 }
                 if activeTool == .stepNumber {
+                    selectedMagnifierID = nil
                     let item = AnnotationItem(
                         tool: .stepNumber,
                         color: activeColor,
@@ -213,6 +337,19 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
                     needsDisplay = true
                     return
                 }
+                if activeTool == .magnifier {
+                    let item = makeLiveMagnifierItem(at: point)
+                    history.append(item)
+                    selectedMagnifierID = item.id
+                    // 单击落地后立即转为选中可编辑态并退出放置准星，避免再粘随第二个放大镜
+                    activeTool = .none
+                    syncToolbarState()
+                    toolbarView.reposition(for: rect, within: bounds)
+                    updateCursor(at: point)
+                    needsDisplay = true
+                    return
+                }
+                selectedMagnifierID = nil
                 let item = AnnotationItem(
                     tool: activeTool,
                     color: activeColor,
@@ -230,6 +367,32 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
                 return
             }
 
+            // 未选中工具时点击已放置的放大镜即可激活选中并开始拖动
+            if let hit = history.items.reversed().first(where: {
+                $0.tool == .magnifier && AnnotationRenderer.hitTestMagnifier(at: point, item: $0) == .body
+            }) {
+                selectedMagnifierID = hit.id
+                liveMagnifierRadius = AnnotationRenderer.magnifierRadius(for: hit)
+                liveMagnifierZoom = hit.magnification
+                activeColor = hit.color
+                let offset = CGSize(width: point.x - hit.startPoint.x, height: point.y - hit.startPoint.y)
+                interaction = .movingMagnifier(id: hit.id, offset: offset)
+                syncToolbarState()
+                toolbarView.reposition(for: rect, within: bounds)
+                updateCursor(at: point)
+                needsDisplay = true
+                return
+            }
+
+            if selectedMagnifierID != nil, rect.contains(point) {
+                selectedMagnifierID = nil
+                syncToolbarState()
+                toolbarView.reposition(for: rect, within: bounds)
+                updateCursor(at: point)
+                needsDisplay = true
+                return
+            }
+
             if rect.contains(point) {
                 interaction = .movingSelection(lastPoint: point)
                 toolbarView.isHidden = true
@@ -238,6 +401,7 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
         }
 
         // 开始新选区（记录当前悬停窗口以便单击直接捕获整窗）
+        selectedMagnifierID = nil
         pendingClickWindow = hoveredWindow
         onSelectionBegan?()
         history.clear()
@@ -291,6 +455,44 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
             inProgressItem = item
             interaction = .drawingAnnotation(item)
             needsDisplay = true
+
+        case .movingMagnifier(let id, let offset):
+            let rawCenter = CGPoint(x: point.x - offset.width, y: point.y - offset.height)
+            let clampBox = selectionRect ?? bounds
+            let newCenter = CGPoint(
+                x: min(max(rawCenter.x, clampBox.minX), clampBox.maxX),
+                y: min(max(rawCenter.y, clampBox.minY), clampBox.maxY)
+            )
+            _ = history.update(id: id) { item in
+                let r = AnnotationRenderer.magnifierRadius(for: item)
+                item.startPoint = newCenter
+                item.endPoint = CGPoint(x: newCenter.x + r, y: newCenter.y)
+            }
+            NSCursor.closedHand.set()
+            needsDisplay = true
+
+        case .resizingMagnifier(let id):
+            var updatedRadius = liveMagnifierRadius
+            _ = history.update(id: id) { item in
+                let newR = min(
+                    AnnotationRenderer.maxMagnifierRadius,
+                    max(AnnotationRenderer.minMagnifierRadius, hypot(point.x - item.startPoint.x, point.y - item.startPoint.y))
+                )
+                item.endPoint = CGPoint(x: item.startPoint.x + newR, y: item.startPoint.y)
+                updatedRadius = newR
+            }
+            liveMagnifierRadius = updatedRadius
+            needsDisplay = true
+
+        case .zoomingMagnifier(let id):
+            var updatedZoom = liveMagnifierZoom
+            _ = history.update(id: id) { item in
+                let newZoom = AnnotationRenderer.magnifierZoom(fromHandlePoint: point, center: item.startPoint)
+                item.magnification = newZoom
+                updatedZoom = newZoom
+            }
+            liveMagnifierZoom = updatedZoom
+            needsDisplay = true
         }
     }
 
@@ -336,11 +538,15 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
                 syncToolbarState()
             }
 
+        case .movingMagnifier, .resizingMagnifier, .zoomingMagnifier:
+            break
+
         case .idle:
             break
         }
 
         interaction = .idle
+        updateCursor(at: releasePoint)
         needsDisplay = true
     }
 
@@ -353,6 +559,125 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
             hoveredWindow = nil
         }
         updateCursor(at: point)
+        needsDisplay = true
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        if activeTool == .magnifier {
+            activeTool = .none
+            syncToolbarState()
+            if let rect = selectionRect {
+                toolbarView.reposition(for: rect, within: bounds)
+            }
+            if let pointer = pointerLocation {
+                updateCursor(at: pointer)
+            }
+            needsDisplay = true
+            return
+        }
+        if selectedMagnifierID != nil {
+            selectedMagnifierID = nil
+            syncToolbarState()
+            if let rect = selectionRect {
+                toolbarView.reposition(for: rect, within: bounds)
+            }
+            if let pointer = pointerLocation {
+                updateCursor(at: pointer)
+            }
+            needsDisplay = true
+            return
+        }
+        super.rightMouseDown(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard selectionRect != nil, textContainer == nil else {
+            super.scrollWheel(with: event)
+            return
+        }
+        let rawDelta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY * 0.8 : event.scrollingDeltaY * 24
+        guard abs(rawDelta) > 0.01 else { return }
+        let isOption = event.modifierFlags.contains(.option)
+
+        if activeTool == .magnifier && selectedMagnifierID == nil {
+            if isOption {
+                liveMagnifierZoom = AnnotationRenderer.scaledMagnifierZoom(current: liveMagnifierZoom, scrollDelta: rawDelta)
+            } else {
+                liveMagnifierRadius = AnnotationRenderer.scaledMagnifierRadius(current: liveMagnifierRadius, scrollDelta: rawDelta)
+            }
+            needsDisplay = true
+            return
+        }
+
+        let pointer = pointerLocation ?? convert(event.locationInWindow, from: nil)
+        let targetID = selectedMagnifierID ?? (activeTool == .none ? hoveredMagnifierID(at: pointer) : nil)
+        guard let targetID else {
+            super.scrollWheel(with: event)
+            return
+        }
+
+        if selectedMagnifierID != targetID {
+            selectedMagnifierID = targetID
+            syncToolbarState()
+            if let rect = selectionRect {
+                toolbarView.reposition(for: rect, within: bounds)
+            }
+        }
+        _ = history.update(id: targetID) { item in
+            if isOption {
+                let nextZoom = AnnotationRenderer.scaledMagnifierZoom(current: item.magnification, scrollDelta: rawDelta)
+                item.magnification = nextZoom
+                liveMagnifierZoom = nextZoom
+            } else {
+                let currentR = AnnotationRenderer.magnifierRadius(for: item)
+                let nextR = AnnotationRenderer.scaledMagnifierRadius(current: currentR, scrollDelta: rawDelta)
+                item.endPoint = CGPoint(x: item.startPoint.x + nextR, y: item.startPoint.y)
+                liveMagnifierRadius = nextR
+            }
+        }
+        needsDisplay = true
+    }
+
+    override func magnify(with event: NSEvent) {
+        guard selectionRect != nil,
+              textContainer == nil,
+              abs(event.magnification) > 0.001 else {
+            super.magnify(with: event)
+            return
+        }
+
+        if activeTool == .magnifier && selectedMagnifierID == nil {
+            liveMagnifierRadius = min(
+                AnnotationRenderer.maxMagnifierRadius,
+                max(AnnotationRenderer.minMagnifierRadius, liveMagnifierRadius * (1.0 + event.magnification))
+            )
+            needsDisplay = true
+            return
+        }
+
+        let pointer = pointerLocation ?? convert(event.locationInWindow, from: nil)
+        let targetID = selectedMagnifierID ?? (activeTool == .none ? hoveredMagnifierID(at: pointer) : nil)
+        guard let targetID else {
+            super.magnify(with: event)
+            return
+        }
+
+        if selectedMagnifierID != targetID {
+            selectedMagnifierID = targetID
+            syncToolbarState()
+            if let rect = selectionRect {
+                toolbarView.reposition(for: rect, within: bounds)
+            }
+        }
+        _ = history.update(id: targetID) { item in
+            let currentR = AnnotationRenderer.magnifierRadius(for: item)
+            let nextR = min(
+                AnnotationRenderer.maxMagnifierRadius,
+                max(AnnotationRenderer.minMagnifierRadius, currentR * (1.0 + event.magnification))
+            )
+            item.endPoint = CGPoint(x: item.startPoint.x + nextR, y: item.startPoint.y)
+            liveMagnifierRadius = nextR
+        }
         needsDisplay = true
     }
 
@@ -375,7 +700,47 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
                 window?.makeFirstResponder(self)
                 return
             }
+            if activeTool == .magnifier {
+                activeTool = .none
+                syncToolbarState()
+                if let rect = selectionRect {
+                    toolbarView.reposition(for: rect, within: bounds)
+                }
+                if let pointer = pointerLocation {
+                    updateCursor(at: pointer)
+                }
+                needsDisplay = true
+                return
+            }
+            if selectedMagnifierID != nil {
+                selectedMagnifierID = nil
+                syncToolbarState()
+                if let rect = selectionRect {
+                    toolbarView.reposition(for: rect, within: bounds)
+                }
+                if let pointer = pointerLocation {
+                    updateCursor(at: pointer)
+                }
+                needsDisplay = true
+                return
+            }
             onCancel?()
+            return
+        }
+
+        if (event.keyCode == 51 || event.keyCode == 117),
+           textContainer == nil,
+           let selectedID = selectedMagnifierID {
+            _ = history.remove(id: selectedID)
+            selectedMagnifierID = nil
+            syncToolbarState()
+            if let rect = selectionRect {
+                toolbarView.reposition(for: rect, within: bounds)
+            }
+            if let pointer = pointerLocation {
+                updateCursor(at: pointer)
+            }
+            needsDisplay = true
             return
         }
 
@@ -451,25 +816,45 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
         toolbarView.onSelectTool = { [weak self] tool in
             guard let self else { return }
             self.commitPendingTextIfNeeded()
+            self.selectedMagnifierID = nil
             self.activeTool = tool
             if tool == .mosaic {
                 self.ensureMosaicThumbnail()
+            } else if tool == .magnifier {
+                self.liveMagnifierZoom = self.zoomForWidth(self.activeWidth)
             }
             self.syncToolbarState()
             if let rect = self.selectionRect {
                 self.toolbarView.reposition(for: rect, within: self.bounds)
             }
+            if let pointer = self.pointerLocation {
+                self.updateCursor(at: pointer)
+            }
+            self.needsDisplay = true
         }
         toolbarView.onSelectColor = { [weak self] color in
             guard let self else { return }
             self.activeColor = color
             self.textView?.textColor = color.nsColor
+            if let id = self.selectedMagnifierID {
+                _ = self.history.update(id: id) { $0.color = color }
+            }
             self.syncToolbarState()
+            self.needsDisplay = true
         }
         toolbarView.onSelectWidth = { [weak self] width in
             guard let self else { return }
             self.activeWidth = width
+            let nextZoom = self.zoomForWidth(width)
+            self.liveMagnifierZoom = nextZoom
+            if let id = self.selectedMagnifierID {
+                _ = self.history.update(id: id) {
+                    $0.strokeWidth = CGFloat(width.rawValue)
+                    $0.magnification = nextZoom
+                }
+            }
             self.syncToolbarState()
+            self.needsDisplay = true
         }
         toolbarView.onUndo = { [weak self] in self?.performUndo() }
         toolbarView.onRedo = { [weak self] in self?.performRedo() }
@@ -487,7 +872,8 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
             color: activeColor,
             width: activeWidth,
             canUndo: history.canUndo,
-            canRedo: history.canRedo
+            canRedo: history.canRedo,
+            forceShowStyle: selectedMagnifierID != nil
         )
     }
 
@@ -506,15 +892,30 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
     private func performUndo() {
         commitPendingTextIfNeeded()
         history.undo()
+        syncSelectedMagnifierAfterHistoryMutation()
         syncToolbarState()
+        if let rect = selectionRect, !toolbarView.isHidden {
+            toolbarView.reposition(for: rect, within: bounds)
+        }
         needsDisplay = true
     }
 
     private func performRedo() {
         commitPendingTextIfNeeded()
         history.redo()
+        syncSelectedMagnifierAfterHistoryMutation()
         syncToolbarState()
+        if let rect = selectionRect, !toolbarView.isHidden {
+            toolbarView.reposition(for: rect, within: bounds)
+        }
         needsDisplay = true
+    }
+
+    private func syncSelectedMagnifierAfterHistoryMutation() {
+        if let id = selectedMagnifierID,
+           !history.items.contains(where: { $0.id == id && $0.tool == .magnifier }) {
+            selectedMagnifierID = nil
+        }
     }
 
     private func triggerCopy() {
@@ -610,7 +1011,7 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
             return !item.points.isEmpty
         case .text:
             return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .stepNumber:
+        case .stepNumber, .magnifier:
             return true
         }
     }
@@ -636,6 +1037,84 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
         default:
             return false
         }
+    }
+
+    private func zoomForWidth(_ width: StrokeWidth) -> CGFloat {
+        switch width {
+        case .thin:
+            return 1.8
+        case .medium:
+            return 2.2
+        case .thick:
+            return 3.0
+        }
+    }
+
+    private func selectedMagnifierItem() -> AnnotationItem? {
+        guard let id = selectedMagnifierID else { return nil }
+        return history.items.first(where: { $0.id == id && $0.tool == .magnifier })
+    }
+
+    private func hoveredMagnifierID(at point: CGPoint) -> UUID? {
+        history.items.reversed().first(where: {
+            $0.tool == .magnifier && AnnotationRenderer.hitTestMagnifier(at: point, item: $0) != nil
+        })?.id
+    }
+
+    private func shouldShowLiveToolMagnifier() -> Bool {
+        guard activeTool == .magnifier,
+              selectedMagnifierID == nil,
+              textContainer == nil,
+              let rect = selectionRect,
+              let pointer = pointerLocation else {
+            return false
+        }
+        switch interaction {
+        case .idle:
+            break
+        default:
+            return false
+        }
+        if !toolbarView.isHidden && toolbarView.frame.contains(pointer) {
+            return false
+        }
+        if SelectionMath.hitTestHandle(pointer, rect: rect) != nil {
+            return false
+        }
+        return rect.contains(pointer)
+    }
+
+    private func makeLiveMagnifierItem(at point: CGPoint) -> AnnotationItem {
+        AnnotationItem(
+            tool: .magnifier,
+            color: activeColor,
+            strokeWidth: CGFloat(activeWidth.rawValue),
+            startPoint: point,
+            endPoint: CGPoint(x: point.x + liveMagnifierRadius, y: point.y),
+            magnification: liveMagnifierZoom
+        )
+    }
+
+    private func drawLiveMagnifierBadge(center: CGPoint, radius: CGFloat, zoom: CGFloat, in ctx: CGContext) {
+        let label = String(format: "Ø%.0f · %.1f×", radius * 2, zoom) as NSString
+        let textSize = label.size(withAttributes: Self.hudMagnifierBadgeAttrs)
+        let pillWidth = textSize.width + 18
+        let pillHeight: CGFloat = 22
+
+        let rawX = center.x - pillWidth * 0.5
+        let clampedX = min(max(rawX, bounds.minX + 8), bounds.maxX - pillWidth - 8)
+        var y = center.y + radius + 10
+        if y + pillHeight > bounds.maxY - 8 {
+            y = max(bounds.minY + 8, center.y - radius - 10 - pillHeight)
+        }
+        let pillRect = CGRect(x: clampedX, y: y, width: pillWidth, height: pillHeight)
+
+        LiquidGlassCG.drawGlassPanel(in: pillRect, cornerRadius: 11, context: ctx, fillAlpha: 0.68)
+
+        label.draw(
+            at: CGPoint(x: pillRect.minX + 9, y: pillRect.minY + (pillHeight - textSize.height) * 0.5),
+            withAttributes: Self.hudMagnifierBadgeAttrs
+        )
     }
 
     private func copySampledColor(at point: CGPoint) {
@@ -664,6 +1143,21 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
             NSCursor.iBeam.set()
             return
         }
+        if let selected = selectedMagnifierItem(),
+           let part = AnnotationRenderer.hitTestMagnifier(at: point, item: selected) {
+            switch part {
+            case .sizeHandle, .zoomHandle:
+                NSCursor.pointingHand.set()
+            case .body:
+                switch interaction {
+                case .movingMagnifier:
+                    NSCursor.closedHand.set()
+                default:
+                    NSCursor.openHand.set()
+                }
+            }
+            return
+        }
         if let rect = selectionRect {
             if let handle = SelectionMath.hitTestHandle(point, rect: rect) {
                 switch handle {
@@ -682,6 +1176,8 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
                     NSCursor.openHand.set()
                 case .text:
                     NSCursor.iBeam.set()
+                case .magnifier:
+                    Self.transparentCursor.set()
                 default:
                     NSCursor.crosshair.set()
                 }
@@ -696,11 +1192,7 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
             ? "点击窗口或拖拽框选文字进行离线 OCR · Esc 取消"
             : "点击捕获窗口 · 拖拽自由框选 · C 复制色值 · Esc 取消"
 
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-            .foregroundColor: NSColor.white
-        ]
-        let textSize = (hint as NSString).size(withAttributes: attributes)
+        let textSize = (hint as NSString).size(withAttributes: Self.hudHintAttrs)
         let pillWidth = textSize.width + 28
         let pillHeight: CGFloat = 34
         let pillRect = CGRect(
@@ -710,20 +1202,12 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
             height: pillHeight
         )
 
-        ctx.saveGState()
-        let path = CGPath(roundedRect: pillRect, cornerWidth: 17, cornerHeight: 17, transform: nil)
-        ctx.addPath(path)
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.72).cgColor)
-        ctx.fillPath()
+        LiquidGlassCG.drawGlassPanel(in: pillRect, cornerRadius: 30, context: ctx, fillAlpha: 0.64)
 
-        let previous = NSGraphicsContext.current
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
         (hint as NSString).draw(
             at: CGPoint(x: pillRect.minX + 14, y: pillRect.minY + (pillHeight - textSize.height) * 0.5),
-            withAttributes: attributes
+            withAttributes: Self.hudHintAttrs
         )
-        NSGraphicsContext.current = previous
-        ctx.restoreGState()
     }
 
     private func drawSelectionChrome(rect: CGRect, in ctx: CGContext) {
@@ -746,29 +1230,19 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
         // 实时像素尺寸标签
         let pixels = SelectionMath.pixelSize(for: rect, scale: display.backingScaleFactor)
         let label = "\(pixels.width) × \(pixels.height)"
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: NSColor.white
-        ]
-        let textSize = (label as NSString).size(withAttributes: attributes)
+        let textSize = (label as NSString).size(withAttributes: Self.hudSizeBadgeAttrs)
         let badgeW = textSize.width + 14
         let badgeH: CGFloat = 22
         let badgeY = rect.minY >= badgeH + 6 ? rect.minY - badgeH - 6 : rect.minY + 6
         let badgeX = min(max(rect.minX, 4), bounds.width - badgeW - 4)
         let badgeRect = CGRect(x: badgeX, y: badgeY, width: badgeW, height: badgeH)
 
-        let badgePath = CGPath(roundedRect: badgeRect, cornerWidth: 5, cornerHeight: 5, transform: nil)
-        ctx.addPath(badgePath)
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.76).cgColor)
-        ctx.fillPath()
+        LiquidGlassCG.drawGlassPanel(in: badgeRect, cornerRadius: 11, context: ctx, fillAlpha: 0.72)
 
-        let previous = NSGraphicsContext.current
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
         (label as NSString).draw(
             at: CGPoint(x: badgeRect.minX + 7, y: badgeRect.minY + 3),
-            withAttributes: attributes
+            withAttributes: Self.hudSizeBadgeAttrs
         )
-        NSGraphicsContext.current = previous
         ctx.restoreGState()
     }
 
@@ -781,11 +1255,7 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
 
         let pixels = SelectionMath.pixelSize(for: rect, scale: display.backingScaleFactor)
         let label = "\(win.ownerName) · \(pixels.width) × \(pixels.height)"
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: NSColor.white
-        ]
-        let textSize = (label as NSString).size(withAttributes: attributes)
+        let textSize = (label as NSString).size(withAttributes: Self.hudWindowBadgeAttrs)
         let badgeW = textSize.width + 16
         let badgeH: CGFloat = 22
         let badgeY = rect.minY >= badgeH + 6 ? rect.minY - badgeH - 6 : rect.minY + 6
@@ -797,20 +1267,22 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
         ctx.setFillColor(NSColor.systemBlue.withAlphaComponent(0.92).cgColor)
         ctx.fillPath()
 
-        let previous = NSGraphicsContext.current
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
         (label as NSString).draw(
             at: CGPoint(x: badgeRect.minX + 8, y: badgeRect.minY + 3.5),
-            withAttributes: attributes
+            withAttributes: Self.hudWindowBadgeAttrs
         )
-        NSGraphicsContext.current = previous
         ctx.restoreGState()
     }
 
     private func drawMagnifierLoupe(at point: CGPoint, in ctx: CGContext) {
-        guard let sampled = ensurePixelSampler()?.sample(atCanvasPoint: point, canvasBounds: bounds) else {
+        guard bounds.width > 0, bounds.height > 0,
+              display.image.width > 0, display.image.height > 0 else {
             return
         }
+
+        let pixelX = min(max(Int((point.x / bounds.width) * CGFloat(display.image.width)), 0), display.image.width - 1)
+        let pixelY = min(max(Int((point.y / bounds.height) * CGFloat(display.image.height)), 0), display.image.height - 1)
+        let sampledColor = ensurePixelSampler()?.samplePixel(x: pixelX, y: pixelY) ?? SampledColor(r: 0, g: 0, b: 0)
 
         let cols = 17
         let rows = 13
@@ -837,19 +1309,30 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
         let previewRect = CGRect(x: cardX, y: cardY, width: previewW, height: previewH)
         let infoRect = CGRect(x: cardX, y: cardY + previewH, width: cardW, height: infoH)
 
+        let cardPath = CGPath(roundedRect: cardRect, cornerWidth: 14, cornerHeight: 14, transform: nil)
         ctx.saveGState()
-        let cardPath = CGPath(roundedRect: cardRect, cornerWidth: 9, cornerHeight: 9, transform: nil)
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: -8),
+            blur: 18,
+            color: NSColor.black.withAlphaComponent(0.45).cgColor
+        )
+        ctx.addPath(cardPath)
+        ctx.setFillColor(NSColor(calibratedRed: 0.08, green: 0.10, blue: 0.14, alpha: 0.94).cgColor)
+        ctx.fillPath()
+        ctx.restoreGState()
+
+        ctx.saveGState()
         ctx.addPath(cardPath)
         ctx.clip()
 
         // 背景填充
-        ctx.setFillColor(NSColor(calibratedWhite: 0.10, alpha: 0.94).cgColor)
+        ctx.setFillColor(NSColor(calibratedRed: 0.08, green: 0.10, blue: 0.14, alpha: 0.92).cgColor)
         ctx.fill(cardRect)
 
         // 裁剪物理像素并按 8x 最近邻放大绘制
         let desiredCrop = CGRect(
-            x: sampled.pixelX - cols / 2,
-            y: sampled.pixelY - rows / 2,
+            x: pixelX - cols / 2,
+            y: pixelY - rows / 2,
             width: cols,
             height: rows
         )
@@ -907,51 +1390,59 @@ final class CaptureCanvasView: NSView, NSTextViewDelegate {
         // 色块预览点
         let swatchRect = CGRect(x: infoRect.minX + 10, y: infoRect.minY + 9, width: 12, height: 12)
         ctx.setFillColor(
-            NSColor(
-                calibratedRed: CGFloat(sampled.color.r) / 255.0,
-                green: CGFloat(sampled.color.g) / 255.0,
-                blue: CGFloat(sampled.color.b) / 255.0,
+            CGColor(
+                srgbRed: CGFloat(sampledColor.r) / 255.0,
+                green: CGFloat(sampledColor.g) / 255.0,
+                blue: CGFloat(sampledColor.b) / 255.0,
                 alpha: 1
-            ).cgColor
+            )
         )
         ctx.fillEllipse(in: swatchRect)
         ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.45).cgColor)
         ctx.setLineWidth(0.75)
         ctx.strokeEllipse(in: swatchRect)
 
-        // 色值与坐标文字
-        let previous = NSGraphicsContext.current
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
-
-        let colorText = useRGBFormat ? sampled.color.rgbString : sampled.color.hexString
-        let primaryAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: NSColor.white
-        ]
+        // 色值与坐标文字（直接复用 isFlipped 画布活跃上下文并读取预缓存字体字典）
+        let colorText = useRGBFormat ? sampledColor.rgbString : sampledColor.hexString
         (colorText as NSString).draw(
             at: CGPoint(x: infoRect.minX + 27, y: infoRect.minY + 8),
-            withAttributes: primaryAttrs
+            withAttributes: Self.hudLoupeColorAttrs
         )
 
-        let subText = "\(sampled.pixelX),\(sampled.pixelY) · C复制 ⇧切换"
-        let subAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 9.5, weight: .regular),
-            .foregroundColor: NSColor.white.withAlphaComponent(0.68)
-        ]
+        let subText = "\(pixelX),\(pixelY) · C复制 ⇧切换"
         (subText as NSString).draw(
             at: CGPoint(x: infoRect.minX + 10, y: infoRect.minY + 29),
-            withAttributes: subAttrs
+            withAttributes: Self.hudLoupeSubAttrs
         )
 
-        NSGraphicsContext.current = previous
         ctx.restoreGState()
 
-        // 卡片外边框
+        // Liquid Glass 顶部内高光 + 1px 色散彩虹棱边
+        let innerCardRect = cardRect.insetBy(dx: 1.0, dy: 1.0)
+        let innerCardPath = CGPath(roundedRect: innerCardRect, cornerWidth: 13, cornerHeight: 13, transform: nil)
         ctx.saveGState()
-        ctx.addPath(cardPath)
-        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.28).cgColor)
-        ctx.setLineWidth(1)
-        ctx.strokePath()
+        ctx.addPath(innerCardPath)
+        ctx.setLineWidth(1.0)
+        ctx.replacePathWithStrokedPath()
+        ctx.clip()
+        if let srgb = CGColorSpace(name: CGColorSpace.sRGB),
+           let grad = CGGradient(
+               colorsSpace: srgb,
+               colors: [
+                   NSColor.white.withAlphaComponent(0.92).cgColor,
+                   NSColor.white.withAlphaComponent(0.0).cgColor
+               ] as CFArray,
+               locations: [0.0, 1.0]
+           ) {
+            ctx.drawLinearGradient(
+                grad,
+                start: CGPoint(x: cardRect.midX, y: cardRect.minY),
+                end: CGPoint(x: cardRect.midX, y: cardRect.minY + cardRect.height * 0.45),
+                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+            )
+        }
         ctx.restoreGState()
+
+        LiquidGlassCG.drawChromaticRim(in: cardRect, cornerRadius: 14, context: ctx, alpha: 0.72)
     }
 }

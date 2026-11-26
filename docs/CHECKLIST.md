@@ -79,3 +79,20 @@
 - [x] 重构 `CaptureCoordinator` 状态机（防 `isCapturing` 永久锁死、超时复位、休眠与显示器变更自动清理遮罩、重复触发自愈）
 - [x] 升级 `HotkeyManager` 改用 `GetEventDispatcherTarget()`，支持录制期暂停/恢复；`AppDelegate` 增加开机延迟补注册、休眠唤醒/屏醒/锁屏解锁自动重注册
 - [x] 全部单元测试通过、固定证书签名重建 `dist/QuickSnap.dmg` 并重装启动 `/Applications/QuickSnap.app`
+- [x] 修复 `FloatingToolbarView` 中 `StrokeDotButton` / `ColorSwatchButton` 未重写 `mouseDown` 导致点击线条粗细或工具栏边缘透传给画布重新开始截图的 BUG
+- [x] 修复 `PixelSampler` 对 64 位 HDR / Display P3 / IOSurface 位图的兼容性（增加 1×1 sRGB 采样兜底）并让放大镜取色浮窗在启动截图时立即显示
+
+## Stage 10：工具栏放大镜标注工具（局部分镜放大）
+- [x] 在 `AnnotationModels` 新增 `.magnifier` 工具及 `magnification` 倍率字段，`FloatingToolbarView` 自动渲染放大镜图标按钮
+- [x] 在 `AnnotationRenderer` 实现 `drawMagnifier`，支持点击默认半径与拖拽自定义半径、边缘安全裁剪及高清导出一致渲染
+- [x] 在 `CaptureCanvasView` 与 `ImageExporter` 传入原始 `sourceImage`，支持实时预览、撤销重做、Pin 固定与导出
+- [x] 补充放大镜渲染与导出单元测试，通过全部测试、固定证书签名重建 `dist/QuickSnap.dmg` 并重装启动 `/Applications/QuickSnap.app`
+- [x] 升级 `.magnifier` 为光标随动实时放大镜模式：选中工具后鼠标化为圆形放大镜自由移动，支持鼠标滚轮/触控板捏合实时缩放镜面大小（`Option + 滚轮` 调倍率）、左键点击固定、右键退出
+- [x] 升级为「随动放置 + 可编辑矢量对象」融合模式：单击固定后自动转为选中态并退出放置准星（不粘第二枚圆），支持拖动圆心移动、蓝点/滚轮调直径、绿点/`Option+滚轮`调倍率、悬停滚轮快速重调、`Delete` 删除与工具栏选色即时同步
+- [x] 将放大镜镜框改为纯中性光学玻璃边框（银白高光环 + 暗色发丝边，移除彩色/红色外框），工具栏放置与编辑放大镜时隐藏色块仅保留倍率调节档位
+
+## Stage 11：全应用 Liquid Glass UI 升级
+- [x] 新建 `Design/LiquidGlassStyle.swift`，统一提供 AppKit（`LiquidGlassBackdropView`）、SwiftUI（`liquidGlassSurface`）与 CoreGraphics HUD（`LiquidGlassCG`）的顶部高光弧、1px 彩虹色散棱边、内嵌 `0.95` 顶部白高光、30px 连续圆角与深邃柔和投影
+- [x] 全量升级 `FloatingToolbarView`、`ToastWindow`、`PreferencesWindow`、`OCRResultWindow`、`PinnedImageWindow` 与 `CaptureCanvasView` 浮标卡片（保持截图导出用放大镜标注仍为纯中性玻璃边框）
+- [x] Release 编译零警告、全部单元测试通过、固定证书签名重建 `dist/QuickSnap.dmg` 并重装启动 `/Applications/QuickSnap.app`
+- [x] 修复 macOS 15 CoreText 在 `drawMagnifierLoupe` 中因高频构造 `NSFont.monospacedSystemFont` 与替换活跃翻转 `NSGraphicsContext` 导致的 `SIGABRT` 闪退（改用预缓存 `monospacedDigitSystemFont` 并安全复用当前翻转上下文）

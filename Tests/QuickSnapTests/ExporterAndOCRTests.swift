@@ -97,6 +97,14 @@ final class ExporterAndOCRTests: XCTestCase {
                 strokeWidth: 5,
                 startPoint: CGPoint(x: 360, y: 150),
                 stepNumber: 1
+            ),
+            AnnotationItem(
+                tool: .magnifier,
+                color: .blue,
+                strokeWidth: 3.5,
+                startPoint: CGPoint(x: 220, y: 220),
+                endPoint: CGPoint(x: 260, y: 220),
+                magnification: 2.2
             )
         ]
 
@@ -182,5 +190,140 @@ final class ExporterAndOCRTests: XCTestCase {
         let bgraColor = try XCTUnwrap(bgraSampler.samplePixel(x: 5, y: 5))
         XCTAssertEqual(bgraColor, SampledColor(r: 220, g: 80, b: 40))
         XCTAssertEqual(bgraColor.hexString, "#DC5028")
+
+        // 3. 测试 64-bit 16-bpc Wide Gamut 位图（走 1x1 sRGB 通用采样兜底路径）
+        let displayP3 = CGColorSpace(name: CGColorSpace.displayP3) ?? srgb
+        let wideBitmapInfo = CGBitmapInfo.byteOrder16Little.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        let hdrCtx = try XCTUnwrap(CGContext(
+            data: nil,
+            width: 16,
+            height: 16,
+            bitsPerComponent: 16,
+            bytesPerRow: 0,
+            space: displayP3,
+            bitmapInfo: wideBitmapInfo
+        ))
+        hdrCtx.setFillColor(CGColor(srgbRed: 68.0 / 255.0, green: 170.0 / 255.0, blue: 102.0 / 255.0, alpha: 1))
+        hdrCtx.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+        let hdrImage = try XCTUnwrap(hdrCtx.makeImage())
+        let hdrSampler = try XCTUnwrap(PixelSampler(image: hdrImage))
+        let hdrColor = try XCTUnwrap(hdrSampler.samplePixel(x: 8, y: 8))
+        XCTAssertTrue(abs(Int(hdrColor.r) - 68) <= 2)
+        XCTAssertTrue(abs(Int(hdrColor.g) - 170) <= 2)
+        XCTAssertTrue(abs(Int(hdrColor.b) - 102) <= 2)
+    }
+
+    func testMagnifierAnnotationZoomsUnderlyingPixels() throws {
+        let pixelW = 800
+        let pixelH = 600
+        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
+        let ctx = try XCTUnwrap(CGContext(
+            data: nil,
+            width: pixelW,
+            height: pixelH,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: srgb,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        // 背景填充纯蓝，中心绘制 32x32 px（逻辑 16x16 pt，半径 8 pt）纯红方块
+        ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: pixelW, height: pixelH))
+        ctx.setFillColor(CGColor(srgbRed: 1, green: 0, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: 384, y: 284, width: 32, height: 32))
+        let source = try XCTUnwrap(ctx.makeImage())
+
+        let canvasBounds = CGRect(x: 0, y: 0, width: 400, height: 300)
+        let magnifier = AnnotationItem(
+            tool: .magnifier,
+            color: .white,
+            strokeWidth: 3.5,
+            startPoint: CGPoint(x: 200, y: 150),
+            endPoint: CGPoint(x: 250, y: 150),
+            magnification: 4.0
+        )
+
+        let rendered = try ImageExporter.renderCroppedImage(
+            sourceImage: source,
+            canvasBounds: canvasBounds,
+            selectionRect: canvasBounds,
+            annotations: [magnifier]
+        )
+
+        let sampler = try XCTUnwrap(PixelSampler(image: rendered))
+        // 逻辑偏移 +24pt（像素 x=448）在原图是蓝色，经 4.0x 放大后（原 8pt 半径扩至 32pt）应变为纯红
+        let zoomedSample = try XCTUnwrap(sampler.samplePixel(x: 448, y: 300))
+        XCTAssertGreaterThan(zoomedSample.r, 200)
+        XCTAssertLessThan(zoomedSample.b, 50)
+
+        // 镜框外（偏移 +70pt，像素 x=540）仍应保持背景纯蓝
+        let outsideSample = try XCTUnwrap(sampler.samplePixel(x: 540, y: 300))
+        XCTAssertGreaterThan(outsideSample.b, 200)
+        XCTAssertLessThan(outsideSample.r, 50)
+    }
+
+    func testMagnifierScrollWheelScalingClampsBounds() {
+        let enlarged = AnnotationRenderer.scaledMagnifierRadius(current: 68, scrollDelta: 20)
+        XCTAssertGreaterThan(enlarged, 68)
+        XCTAssertLessThanOrEqual(enlarged, AnnotationRenderer.maxMagnifierRadius)
+
+        let maxClamped = AnnotationRenderer.scaledMagnifierRadius(current: 215, scrollDelta: 200)
+        XCTAssertEqual(maxClamped, AnnotationRenderer.maxMagnifierRadius)
+
+        let shrunk = AnnotationRenderer.scaledMagnifierRadius(current: 68, scrollDelta: -20)
+        XCTAssertLessThan(shrunk, 68)
+        XCTAssertGreaterThanOrEqual(shrunk, AnnotationRenderer.minMagnifierRadius)
+
+        let minClamped = AnnotationRenderer.scaledMagnifierRadius(current: 34, scrollDelta: -200)
+        XCTAssertEqual(minClamped, AnnotationRenderer.minMagnifierRadius)
+
+        XCTAssertEqual(AnnotationRenderer.scaledMagnifierZoom(current: 4.8, scrollDelta: 100), 5.0)
+        XCTAssertEqual(AnnotationRenderer.scaledMagnifierZoom(current: 1.6, scrollDelta: -100), 1.5)
+
+        let item = AnnotationItem(
+            tool: .magnifier,
+            color: .red,
+            strokeWidth: 4,
+            startPoint: CGPoint(x: 100, y: 100),
+            endPoint: CGPoint(x: 196, y: 100),
+            magnification: 2.2
+        )
+        XCTAssertEqual(AnnotationRenderer.magnifierRadius(for: item), 96, accuracy: 0.001)
+    }
+
+    func testMagnifierHandlesAndHitTestingRoundTrip() {
+        let item = AnnotationItem(
+            tool: .magnifier,
+            color: .red,
+            strokeWidth: 4,
+            startPoint: CGPoint(x: 200, y: 200),
+            endPoint: CGPoint(x: 280, y: 200),
+            magnification: 3.25
+        )
+
+        let sizeHandle = AnnotationRenderer.magnifierSizeHandleCenter(for: item)
+        XCTAssertEqual(AnnotationRenderer.hitTestMagnifier(at: sizeHandle, item: item), .sizeHandle)
+
+        let zoomHandle = AnnotationRenderer.magnifierZoomHandleCenter(for: item)
+        XCTAssertEqual(AnnotationRenderer.hitTestMagnifier(at: zoomHandle, item: item), .zoomHandle)
+
+        let roundTripZoom = AnnotationRenderer.magnifierZoom(fromHandlePoint: zoomHandle, center: item.startPoint)
+        XCTAssertEqual(roundTripZoom, 3.25, accuracy: 0.01)
+
+        // 超过顶部弧线左右极限角时应稳定夹紧至 [1.5, 5.0]
+        let clampedMinZoom = AnnotationRenderer.magnifierZoom(
+            fromHandlePoint: CGPoint(x: 120, y: 210),
+            center: item.startPoint
+        )
+        XCTAssertEqual(clampedMinZoom, AnnotationRenderer.minMagnifierZoom, accuracy: 0.001)
+
+        let clampedMaxZoom = AnnotationRenderer.magnifierZoom(
+            fromHandlePoint: CGPoint(x: 280, y: 210),
+            center: item.startPoint
+        )
+        XCTAssertEqual(clampedMaxZoom, AnnotationRenderer.maxMagnifierZoom, accuracy: 0.001)
+
+        XCTAssertEqual(AnnotationRenderer.hitTestMagnifier(at: CGPoint(x: 210, y: 210), item: item), .body)
+        XCTAssertNil(AnnotationRenderer.hitTestMagnifier(at: CGPoint(x: 320, y: 200), item: item))
     }
 }

@@ -31,26 +31,31 @@ public final class ToastPresenter {
                 .foregroundStyle(.white)
                 .lineLimit(1)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 18)
         .padding(.vertical, 10)
-        .background(
-            Capsule()
-                .fill(Color.black.opacity(0.82))
-                .overlay(
-                    Capsule().strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
-                )
+        .liquidGlassSurface(
+            cornerRadius: 30,
+            darkTint: Color(red: 0.08, green: 0.10, blue: 0.14).opacity(0.46),
+            lightTint: Color(red: 0.08, green: 0.10, blue: 0.14).opacity(0.46),
+            withBehindWindowBlur: true,
+            material: .hudWindow,
+            showShadow: true
         )
+        .environment(\.colorScheme, .dark)
+        .padding(28)
 
         let hosting = NSHostingView(rootView: view)
+        hosting.wantsLayer = true
+        hosting.layer?.backgroundColor = NSColor.clear.cgColor
         let fittingSize = hosting.fittingSize
-        let width = max(140, fittingSize.width)
-        let height = max(36, fittingSize.height)
+        let width = max(196, fittingSize.width)
+        let height = max(92, fittingSize.height)
 
         let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
         let screenFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
         let frame = NSRect(
             x: screenFrame.midX - width / 2,
-            y: screenFrame.maxY - height - 48,
+            y: screenFrame.maxY - height - 20,
             width: width,
             height: height
         )
@@ -64,7 +69,7 @@ public final class ToastPresenter {
         newPanel.level = .statusBar
         newPanel.backgroundColor = .clear
         newPanel.isOpaque = false
-        newPanel.hasShadow = true
+        newPanel.hasShadow = false
         newPanel.ignoresMouseEvents = true
         newPanel.collectionBehavior = [.canJoinAllSpaces, .transient]
         newPanel.contentView = hosting

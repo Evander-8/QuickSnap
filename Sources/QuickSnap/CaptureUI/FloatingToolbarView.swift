@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 AppKit、QuickSnapCore（AnnotationModels）
- * [OUTPUT]: 提供 FloatingToolbarView（全图标、悬停箭头指针、自定义悬停控件与自适应暗色玻璃工具栏）
+ * [INPUT]: 依赖 AppKit、QuickSnapCore（AnnotationModels）与 Design（LiquidGlassBackdropView）
+ * [OUTPUT]: 提供 FloatingToolbarView（全图标、悬停箭头指针、自定义悬停控件与 Liquid Glass 浮动工具栏）
  * [POS]: CaptureUI 的操作控制栏，位于选区下方或上方，路由标注切换、历史回退、固定贴图与导出动作
  * [PROTOCOL]: Update this header on change, then check GEMINI.md
  */
@@ -39,7 +39,8 @@ private final class ToolbarIconButton: NSControl {
         self.isPrimary = isPrimary
         super.init(frame: NSRect(x: 0, y: 0, width: 30, height: 30))
         wantsLayer = true
-        layer?.cornerRadius = 7
+        layer?.cornerRadius = 10
+        layer?.cornerCurve = .continuous
         toolTip = tooltip
 
         imageView.image = image
@@ -118,15 +119,22 @@ private final class ToolbarIconButton: NSControl {
         if isPrimary {
             let bg = isHovered ? NSColor.systemBlue : NSColor.systemBlue.withAlphaComponent(0.90)
             layer?.backgroundColor = bg.cgColor
+            layer?.borderWidth = 0.75
+            layer?.borderColor = NSColor.white.withAlphaComponent(0.38).cgColor
             imageView.contentTintColor = .white
         } else if isSelected {
-            layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.92).cgColor
+            layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.88).cgColor
+            layer?.borderWidth = 0.75
+            layer?.borderColor = NSColor.white.withAlphaComponent(0.34).cgColor
             imageView.contentTintColor = .white
         } else if isHovered && isEnabled {
             layer?.backgroundColor = NSColor.white.withAlphaComponent(0.16).cgColor
+            layer?.borderWidth = 0.5
+            layer?.borderColor = NSColor.white.withAlphaComponent(0.22).cgColor
             imageView.contentTintColor = .white
         } else {
             layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.borderWidth = 0
             imageView.contentTintColor = NSColor.white.withAlphaComponent(0.88)
         }
     }
@@ -203,7 +211,12 @@ private final class ColorSwatchButton: NSControl {
         updateAppearance()
     }
 
+    override func mouseDown(with event: NSEvent) {
+        layer?.opacity = 0.78
+    }
+
     override func mouseUp(with event: NSEvent) {
+        layer?.opacity = 1.0
         let point = convert(event.locationInWindow, from: nil)
         if bounds.contains(point) {
             onTap?()
@@ -288,7 +301,12 @@ private final class StrokeDotButton: NSControl {
         updateAppearance()
     }
 
+    override func mouseDown(with event: NSEvent) {
+        layer?.opacity = 0.78
+    }
+
     override func mouseUp(with event: NSEvent) {
+        layer?.opacity = 1.0
         let point = convert(event.locationInWindow, from: nil)
         if bounds.contains(point) {
             onTap?()
@@ -324,7 +342,13 @@ final class FloatingToolbarView: NSView {
     var onCopy: (() -> Void)?
     var onCancel: (() -> Void)?
 
-    private let containerEffect = NSVisualEffectView()
+    private let glassContainer = LiquidGlassBackdropView(
+        material: .hudWindow,
+        blendingMode: .withinWindow,
+        preferredRadius: LiquidGlassTokens.preferredRadius,
+        darkTintAlpha: 0.34,
+        forceDarkAppearance: true
+    )
     private let rootStack = NSStackView()
     private let mainRow = NSStackView()
     private let styleSeparator = NSView()
@@ -342,6 +366,7 @@ final class FloatingToolbarView: NSView {
     private var currentTool: AnnotationTool = .none
     private var currentColor: AnnotationColor = .red
     private var currentWidth: StrokeWidth = .medium
+    private var forceShowStyle = false
 
     override var isFlipped: Bool { true }
 
@@ -379,16 +404,26 @@ final class FloatingToolbarView: NSView {
         NSCursor.arrow.set()
     }
 
+    override func mouseDown(with event: NSEvent) {
+        // 吞掉工具栏空白处与分隔线点击，防止透传到下层画布重新框选
+    }
+
+    override func mouseDragged(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {}
+
     func updateState(
         tool: AnnotationTool,
         color: AnnotationColor,
         width: StrokeWidth,
         canUndo: Bool,
-        canRedo: Bool
+        canRedo: Bool,
+        forceShowStyle: Bool = false
     ) {
         currentTool = tool
         currentColor = color
         currentWidth = width
+        self.forceShowStyle = forceShowStyle
         undoButton?.isEnabled = canUndo
         redoButton?.isEnabled = canRedo
         refreshSelectionState()
@@ -417,37 +452,25 @@ final class FloatingToolbarView: NSView {
 
     private func setupUI() {
         wantsLayer = true
-        layer?.shadowColor = NSColor.black.cgColor
-        layer?.shadowOpacity = 0.36
-        layer?.shadowRadius = 12
-        layer?.shadowOffset = NSSize(width: 0, height: -4)
+        layer?.masksToBounds = false
 
-        containerEffect.material = .hudWindow
-        containerEffect.blendingMode = .withinWindow
-        containerEffect.state = .active
-        containerEffect.appearance = NSAppearance(named: .darkAqua)
-        containerEffect.wantsLayer = true
-        containerEffect.layer?.backgroundColor = NSColor(calibratedWhite: 0.11, alpha: 0.68).cgColor
-        containerEffect.layer?.cornerRadius = 11
-        containerEffect.layer?.borderWidth = 0.75
-        containerEffect.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
-        containerEffect.autoresizingMask = [.width, .height]
-        containerEffect.frame = bounds
-        addSubview(containerEffect)
+        glassContainer.autoresizingMask = [.width, .height]
+        glassContainer.frame = bounds
+        addSubview(glassContainer)
 
         rootStack.orientation = .vertical
         rootStack.alignment = .leading
         rootStack.spacing = 6
         rootStack.detachesHiddenViews = true
-        rootStack.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        rootStack.edgeInsets = NSEdgeInsets(top: 7, left: 16, bottom: 7, right: 16)
         rootStack.translatesAutoresizingMaskIntoConstraints = false
-        containerEffect.addSubview(rootStack)
+        glassContainer.contentContainer.addSubview(rootStack)
 
         NSLayoutConstraint.activate([
-            rootStack.leadingAnchor.constraint(equalTo: containerEffect.leadingAnchor),
-            rootStack.trailingAnchor.constraint(equalTo: containerEffect.trailingAnchor),
-            rootStack.topAnchor.constraint(equalTo: containerEffect.topAnchor),
-            rootStack.bottomAnchor.constraint(equalTo: containerEffect.bottomAnchor)
+            rootStack.leadingAnchor.constraint(equalTo: glassContainer.contentContainer.leadingAnchor),
+            rootStack.trailingAnchor.constraint(equalTo: glassContainer.contentContainer.trailingAnchor),
+            rootStack.topAnchor.constraint(equalTo: glassContainer.contentContainer.topAnchor),
+            rootStack.bottomAnchor.constraint(equalTo: glassContainer.contentContainer.bottomAnchor)
         ])
 
         buildMainRow()
@@ -603,11 +626,11 @@ final class FloatingToolbarView: NSView {
             btn.isSelected = (width == currentWidth)
         }
 
-        let showStyle = currentTool != .none
+        let showStyle = currentTool != .none || forceShowStyle
         styleSeparator.isHidden = !showStyle
         styleRow.isHidden = !showStyle
 
-        let hideColors = (currentTool == .mosaic)
+        let hideColors = (currentTool == .mosaic || currentTool == .magnifier || (currentTool == .none && forceShowStyle))
         colorStack.isHidden = hideColors
         styleDivider.isHidden = hideColors
     }

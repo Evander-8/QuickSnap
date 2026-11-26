@@ -41,6 +41,7 @@ final class OCRResultModel: ObservableObject {
 }
 
 private struct OCRResultView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var model: OCRResultModel
     let onTogglePin: (Bool) -> Void
     let onCopy: (String) -> Void
@@ -94,8 +95,17 @@ private struct OCRResultView: View {
                 }
             }
         }
-        .padding(16)
-        .frame(minWidth: 380, minHeight: 260)
+        .padding(.top, 32)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 16)
+        .frame(minWidth: 400, minHeight: 280)
+        .background(
+            ZStack {
+                NativeVisualEffectBackground(material: colorScheme == .dark ? .popover : .sheet)
+                Color.white.opacity(colorScheme == .dark ? 0 : 0.46)
+            }
+            .ignoresSafeArea()
+        )
     }
 
     @ViewBuilder
@@ -110,19 +120,23 @@ private struct OCRResultView: View {
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .textBackgroundColor).opacity(0.6))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .liquidGlassSurface(
+                cornerRadius: 20,
+                darkTint: Color.white.opacity(0.06),
+                lightTint: Color.white.opacity(0.78),
+                showShadow: true
+            )
 
         case .success:
             TextEditor(text: $model.editableText)
                 .font(.system(size: 13))
                 .scrollContentBackground(.hidden)
-                .padding(8)
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                .padding(12)
+                .liquidGlassSurface(
+                    cornerRadius: 20,
+                    darkTint: Color(red: 0.10, green: 0.12, blue: 0.16).opacity(0.44),
+                    lightTint: Color.white.opacity(0.80),
+                    showShadow: true
                 )
 
         case .failure(let message):
@@ -137,8 +151,12 @@ private struct OCRResultView: View {
             }
             .padding()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .liquidGlassSurface(
+                cornerRadius: 20,
+                darkTint: Color.white.opacity(0.06),
+                lightTint: Color.white.opacity(0.78),
+                showShadow: true
+            )
         }
     }
 }
@@ -202,17 +220,26 @@ final class OCRResultWindowController: NSObject, NSWindowDelegate {
             }
         )
 
+        let hosting = NSHostingView(rootView: rootView)
+        hosting.wantsLayer = true
+        hosting.layer?.backgroundColor = NSColor.clear.cgColor
+
         let newPanel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 300),
-            styleMask: [.titled, .closable, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 430, height: 310),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         newPanel.title = "OCR 文字识别结果"
+        newPanel.titleVisibility = .hidden
+        newPanel.titlebarAppearsTransparent = true
+        newPanel.isMovableByWindowBackground = true
+        newPanel.isOpaque = false
+        newPanel.backgroundColor = .clear
         newPanel.level = model.isPinned ? .floating : .normal
         newPanel.isReleasedWhenClosed = false
         newPanel.delegate = self
-        newPanel.contentView = NSHostingView(rootView: rootView)
+        newPanel.contentView = hosting
         newPanel.center()
         panel = newPanel
     }

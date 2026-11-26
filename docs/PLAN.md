@@ -90,3 +90,17 @@
 - **高可靠热键与系统生命周期联动**（`HotkeyManager` / `AppDelegate`）：
   - 热键注册由 `GetApplicationEventTarget()` 升级为 `GetEventDispatcherTarget()`，并支持快捷键录制期间临时挂起/恢复，防止按键冲突。
   - 启动 2.5 秒后自动补注册（兜底开机自启过早窗口），并监听 `willSleep`、`didWake`、`screensDidWake`、`sessionDidBecomeActive`、`didChangeScreenParameters` 与 `com.apple.screenIsUnlocked` 自动复位状态与静默重注册热键。
+
+## 十、Stage 10：工具栏放大镜标注工具（局部分镜放大）
+
+- **工具栏与模型扩展**（`AnnotationModels` / `FloatingToolbarView`）：新增 `.magnifier`（图标 `plus.magnifyingglass`，名称「放大镜」）标注工具，并在 `AnnotationItem` 增加 `magnification` 放大倍率字段（默认 `2.2`）。
+- **实时与离线高保真分镜渲染**（`AnnotationRenderer` / `ImageExporter` / `CaptureCanvasView`）：
+  - 在 `draw` 管线传入原始高分屏 `sourceImage`；选中放大镜后光标即化为实时随动圆形放大镜并自动隐藏系统箭头，移动到选区内任意位置即时预览放大效果。
+  - **融合预览-可编辑对象范式**：左键单击即放置到目标位置并自动切换为「选中可编辑态」同时退出放置准星（绝不粘随第二枚放大镜）；参考 macOS 预览提供圆周**蓝点（拖调镜面半径）**与顶部弧线**绿点（拖调放大倍率 `1.5×–5.0×`）**，可直接拖动圆心微调位置，支持滚轮/触控板捏合缩放半径、`⌥ Option + 滚轮` 调倍率、`Delete` 删除及 `Esc`/点击空白处取消选中。
+  - 镜面内按高插值率裁剪绘制原图对应区域，叠加柔和外阴影、内侧微高光及纯中性光学玻璃镜框（2pt 银白高光环 + 0.5pt 暗色发丝边，无彩色边框，工具栏自动隐藏色块仅保留三档倍率点），支持复制、保存、Pin 固定贴图与 `⌘Z / ⌘⇧Z` 撤销重做。
+
+## 十一、Stage 11：全应用 Liquid Glass UI 升级
+
+- **共享设计系统**（`Sources/QuickSnap/Design/LiquidGlassStyle.swift`）：统一定义 `LiquidGlassTokens`（连续 `30pt` 圆角与色散彩虹棱边色带）、AppKit `LiquidGlassBackdropView`、SwiftUI `.liquidGlassSurface(...)` 修饰器与翻转画布 CoreGraphics `LiquidGlassCG.drawGlassPanel`——全部实现实时背景模糊与高饱和通透感、顶部顺滑亮面高光弧、1px 色散彩虹棱边（chromatic dispersion rim）、内嵌 `1px` 顶部白高光（`rgba(255,255,255,.95)`）与深邃柔和投影。
+- **全端应用界面覆盖**（保持截图内导出的 `.magnifier` 标注仍为纯中性光学玻璃边框不受影响）：
+  - `FloatingToolbarView`（截图浮动工具栏）、`ToastWindow`（全局 HUD 提示胶囊）、`PreferencesWindow`（双栏侧边栏与玻璃卡片）、`OCRResultWindow`（透明标题栏毛玻璃结果面板）、`PinnedImageWindow`（悬停微工具栏与缩放浮标）以及 `CaptureCanvasView`（顶部提示胶囊、选区尺寸浮标、放大镜尺寸/倍率浮标与取色器卡片）。
